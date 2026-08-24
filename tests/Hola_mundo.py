@@ -1,1 +1,1 @@
-print("¡Hola mundo! Proyecto Robot Bípedo.")
+print("Intento de cambio V.2")
