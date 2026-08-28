@@ -1,0 +1,6 @@
+# Carpeta pendiente: robot_interfaces/srv
+# El lider definio que robot_interfaces tendra msg, srv y action.
+# Aqui van los SERVICIOS (.srv) de ROS 2 cuando el proyecto los necesite
+# (ej. SetEStop.srv, calibracion, configuracion de parametros bajo demanda).
+# Por ahora esta vacia a proposito: la arquitectura usa tópicos (ej. /robot/e_stop)
+# y no hay un servicio en uso todavia. Crear el .srv aqui y declararlo en CMakeLists.txt.

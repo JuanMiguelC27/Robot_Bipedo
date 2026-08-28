@@ -1,0 +1,7 @@
+# Carpeta pendiente: robot_description/urdf
+# Aqui va el modelo del robot en URDF/Xacro (single_leg.urdf.xacro para la
+# pata de 3 DOF, y luego el robot completo de 6 DOF).
+# Debe incluir: links, joints, <limit lower=.. upper=..> por motor,
+# ros2_control y el plugin de Gazebo.
+# El archivo se borro a proposito para dejar la descripcion como pendiente;
+# el encargado de description lo crea aqui y lo declara en setup.py.

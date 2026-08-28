@@ -1,0 +1,6 @@
+# Carpeta pendiente: robot_simulation/worlds
+# El lider pidio mundos de simulacion en Gazebo.
+# Aqui van los archivos .sdf / .world (ej. empty.sdf, pata_world.sdf)
+# y cualquier mundo donde se pruebe la pata/robot.
+# Por ahora esta vacia: el esqueleto usa empty.sdf de Gazebo por defecto.
+# El encargado de simulacion agrega aqui los mundos reales.
