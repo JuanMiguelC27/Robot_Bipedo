@@ -1,0 +1,6 @@
+# Carpeta pendiente: robot_interfaces/action
+# El lider definio que robot_interfaces tendra msg, srv y action.
+# Aqui van las ACCIONES (.action) de ROS 2 cuando el proyecto las necesite
+# (ej. Walk.action para trayectorias de locomocion largas con feedback).
+# Por ahora esta vacia a proposito: la arquitectura no usa acciones todavia.
+# Crear el .action aqui y declararlo en CMakeLists.txt.

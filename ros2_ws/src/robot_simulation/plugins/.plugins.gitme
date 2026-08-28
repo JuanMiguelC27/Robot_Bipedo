@@ -1,0 +1,6 @@
+# Carpeta pendiente: robot_simulation/plugins
+# El lider pidio plugins para la simulacion en Gazebo.
+# Aqui van configuraciones de plugins (ros_gz_bridge, gz_ros2_control,
+# sensores, etc.) y cualquier puente especifico hacia los actuadores.
+# Por ahora esta vacia: el esqueleto usa sim_bridge como puente simple.
+# El encargado de simulacion agrega aqui los plugins/Gazebo reales.

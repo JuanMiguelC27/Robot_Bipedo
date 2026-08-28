@@ -1,0 +1,4 @@
+# Carpeta pendiente: robot_description/meshes
+# Aqui van las mallas 3D (.stl / .dae) de las piezas del robot (caderas,
+# rodillas, etc.) que se referencian desde el URDF. El encargado de
+# description las agrega cuando tenga el modelo 3D.

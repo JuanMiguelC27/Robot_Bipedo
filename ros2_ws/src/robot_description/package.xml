@@ -3,14 +3,14 @@
 <package format="3">
   <name>robot_description</name>
   <version>0.0.0</version>
-  <description>TODO: Package description</description>
-  <maintainer email="juan.perez_pomar@uao.edu.co">juanperez</maintainer>
-  <license>TODO: License declaration</license>
+  <description>Descripcion URDF/Xacro del robot bipedo (pata de 3 DOF).</description>
+  <maintainer email="david.collazos_her@uao.edu.co">david</maintainer>
+  <license>Apache-2.0</license>
 
-  <test_depend>ament_copyright</test_depend>
-  <test_depend>ament_flake8</test_depend>
-  <test_depend>ament_pep257</test_depend>
-  <test_depend>python3-pytest</test_depend>
+  <buildtool_depend>ament_python</buildtool_depend>
+  <exec_depend>robot_state_publisher</exec_depend>
+  <exec_depend>xacro</exec_depend>
+  <exec_depend>joint_state_publisher</exec_depend>
 
   <export>
     <build_type>ament_python</build_type>

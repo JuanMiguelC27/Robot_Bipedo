@@ -1,0 +1,3 @@
+# Carpeta pendiente: robot_description/rviz
+# Aqui van las configuraciones de RViz (.rviz) para visualizar el robot,
+# el arbol de joints y los frames TF. El encargado de description las crea.

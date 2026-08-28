@@ -1,16 +1,15 @@
 <?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>robot_control</name>
+  <name>robot_teleop</name>
   <version>0.0.0</version>
-  <description>Paquete de control de bajo nivel del robot bípedo: PID de posición/velocidad/torque, equilibrio e integración IMU.</description>
+  <description>Teleoperacion por barras deslizantes (una por motor).</description>
   <maintainer email="david.collazos_her@uao.edu.co">david</maintainer>
   <license>Apache-2.0</license>
 
   <buildtool_depend>ament_python</buildtool_depend>
   <depend>rclpy</depend>
   <depend>robot_interfaces</depend>
-  <depend>std_msgs</depend>   <!-- ESTA TE FALTABA -->
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

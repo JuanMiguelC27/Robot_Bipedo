@@ -1,39 +1,13 @@
-# ROS 2
-ros2_ws/build/
-ros2_ws/install/
-ros2_ws/log/
+# Build / install de ROS 2
+build/
+install/
+log/
+**/build/
+**/install/
+**/log/
+**/__pycache__/
+*.pyc
 
-# Python
-__pycache__/
-*.py[cod]
-*.so
-
-# Virtual environments
-.venv/
-venv/
-env/
-
-# Jupyter
-.ipynb_checkpoints/
-
-# MATLAB
-*.asv
-*.m~
-slprj/
-*.slxc
-
-# VS Code
+# Editores
 .vscode/
-
-# Sistema operativo
-.DS_Store
-Thumbs.db
-
-# Archivos temporales
-*.tmp
-*.temp
 *.swp
-*~
-
-# Logs
-*.log
