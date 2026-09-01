@@ -19,11 +19,10 @@ class ControlNode(Node):
         # robot_state_publisher usa este campo para emparejar angulo->junta y
         # publicar el TF. Sin name, RViz dice "No transform".
         self.declare_parameter('joint_names',
-                               ['hip_1', 'hip_2', 'knee'])
-        # LIMITE POR MOTOR (coincide con el URDF de robot_description).
-        # Entrada para restringir el angulo de cada articulacion.
-        self.declare_parameter('joint_limits_lower', [-1.5, -1.5, -2.0])
-        self.declare_parameter('joint_limits_upper', [1.5, 1.5, 0.0])
+                               ['Hip_Joint', 'Knee_Joint', 'Ankle_Joint'])
+        # LIMITE POR MOTOR (coincide con el URDF nuevo).
+        self.declare_parameter('joint_limits_lower', [-1.5708, -1.5708, -1.5708])
+        self.declare_parameter('joint_limits_upper', [1.5708, 1.5708, 1.5708])
         self.n = self.get_parameter('num_joints').value
         self.joint_names = self.get_parameter('joint_names').value
         self.lower = self.get_parameter('joint_limits_lower').value
@@ -61,6 +60,7 @@ class ControlNode(Node):
         state = JointState()
         state.name = self.joint_names
         if self.e_stop:
+            self.pid.reset()
             state.position = [0.0] * self.n
             state.velocity = [0.0] * self.n
             state.effort = [0.0] * self.n
@@ -101,7 +101,7 @@ class ControlNode(Node):
         # descarta el mensaje por "viejo" y no publica TF.
         msg = SensorJointState()
         msg.header.stamp = self.get_clock().now().to_msg()
-        msg.header.frame_id = 'base_link'
+        msg.header.frame_id = 'Base_link'
         msg.name = self.joint_names
         msg.position = list(position)
         msg.velocity = [0.0] * self.n

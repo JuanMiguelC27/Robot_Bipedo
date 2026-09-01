@@ -22,4 +22,9 @@ def generate_launch_description():
         executable='joint_state_publisher_gui',
         parameters=[{'use_gui': True}])
 
-    return LaunchDescription([rsp, jsp_gui])
+    rviz = Node(
+        package='rviz2',
+        executable='rviz2',
+        output='screen')
+
+    return LaunchDescription([rsp, jsp_gui, rviz])

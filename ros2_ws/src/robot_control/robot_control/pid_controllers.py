@@ -10,12 +10,18 @@ class PIDController:
         self.integral = [0.0] * num_joints
         self.prev_error = [0.0] * num_joints
 
+    def reset(self):
+        self.integral = [0.0] * self.n
+        self.prev_error = [0.0] * self.n
+
     # update devuelve el vector de corrección para todas las juntas.
     def update(self, measurement, setpoint, dt):
         out = [0.0] * self.n
         for i in range(self.n):
             error = setpoint[i] - measurement[i]
-            self.integral[i] += error * dt
+            # Anti-windup: limitar la integral al rango de salida.
+            self.integral[i] = max(-self.limit,
+                                   min(self.limit, self.integral[i] + error * dt))
             deriv = (error - self.prev_error[i]) / dt
             self.prev_error[i] = error
             val = self.kp * error + self.ki * self.integral[i] + self.kd * deriv

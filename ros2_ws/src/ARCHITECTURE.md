@@ -18,7 +18,7 @@ robot_interfaces
 
 robot_description
   Define la forma física del robot en URDF/Xacro (urdf/single_leg.urdf.xacro):
-  links (base_link, hip1, thigh, shank, foot) y joints (hip_1, hip_2, knee).
+  links (Base_link, Hip_Link, Knee_Link, Ankle_Link) y joints (Hip_Joint, Knee_Joint, Ankle_Joint).
   No tiene algoritmos. Sus carpetas rviz/, meshes/, urdf/ usan .gitme.
 
 robot_kinematics
@@ -101,7 +101,7 @@ Paso 3 - Ver que los tópicos circulan (otra terminal, con source):
 
 Paso 4 - Ver la pata en RViz (otra terminal, con source):
     ros2 run rviz2 rviz2
-  En RViz: Global Options -> Fixed Frame: base_link.
+  En RViz: Global Options -> Fixed Frame: Base_link.
   Add -> RobotModel. En RobotModel, Description Topic: /robot_description.
   La pata debe verse entera y moverse al arrastrar los sliders.
 
