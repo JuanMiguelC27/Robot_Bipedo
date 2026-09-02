@@ -19,8 +19,8 @@ class GuiNode(Node):
         super().__init__('teleop_node')
         self.declare_parameter('num_joints', 3)
         # Servos de 270° -> rango util -135° a +135° por slider.
-        self.declare_parameter('joint_limits_lower_deg', [-135.0, -135.0, -135.0])
-        self.declare_parameter('joint_limits_upper_deg', [ 135.0,  135.0,  135.0])
+        self.declare_parameter('joint_limits_lower_deg', [-10.0, -105.0, -105.0])
+        self.declare_parameter('joint_limits_upper_deg', [ 120.0,  105.0,  105.0])
         self.n = self.get_parameter('num_joints').value
         self.lower_deg = self.get_parameter('joint_limits_lower_deg').value
         self.upper_deg = self.get_parameter('joint_limits_upper_deg').value
