@@ -17,19 +17,28 @@ robot_interfaces
   - srv/ y action/: carpetas creadas, vacías por ahora (.gitme adentro).
 
 robot_description
-  Define la forma física del robot en URDF/Xacro (urdf/single_leg.urdf.xacro):
-  links (base_link, hip1, thigh, shank, foot) y joints (hip_1, hip_2, knee).
-  No tiene algoritmos. Sus carpetas rviz/, meshes/, urdf/ usan .gitme.
+  Define la forma física del robot en URDF/Xacro:
+  urdf/Pata_Robo_Parcial_URDF_V1.2.urdf.xacro incluye el URDF original del
+  robot. Links: Base_link, Hip_Link, Knee_Link, Ankle_Link.
+  Joints: Hip_Joint, Knee_Joint, Ankle_Joint con límites en el URDF.
+  No tiene algoritmos.
 
 robot_kinematics
   Nodo kinematics_node: recibe /robot/command y publica /robot/joint_targets.
-  Hoy reenvía; aquí va luego la cinemática directa/inversa y la locomoción.
+  Usa kinem_leg_gen.py para calcular la cinemática directa (forward kinematics)
+  con parámetros DH. Hoy reenvía; aquí va luego la cinemática inversa,
+  trayectorias y coordinación de patas.
 
 robot_control
-  Nodo control_node: recibe /robot/joint_targets, sigue la consigna con un PID
-  y publica el estado y el comando de los motores. Además aplica el límite de
-  ángulo por motor (clamp) y el E-Stop. Aquí van equilibrio e IMU después.
-  También publica en /joint_states (estándar de ROS) para que se vea en RViz.
+  Nodo control_node: recibe /robot/joint_targets.
+  - Modo verify_mode (por defecto True): solo aplica límites articulares y
+    publica el estado tal cual en /joint_states. Sin PID. Sirve para confirmar
+    que lo que entra por los sliders se refleja idéntico en RViz.
+  - Modo PID (verify_mode=False): activa el PID para control avanzado.
+  Parámetros dinámicos:
+    - joint_limits_lower / joint_limits_upper: límites en radianes.
+    - verify_mode: True = directo, False = PID.
+  También publica en /joint_states (estándar) para que se vea en RViz.
 
 robot_simulation
   Nodo sim_bridge: puente simple que lleva /robot/joint_commands al controlador
@@ -37,8 +46,11 @@ robot_simulation
   (van el mundo de Gazebo y los plugins reales).
 
 robot_teleop
-  Nodo teleop_node: barras deslizantes (una por motor) para mandar la orden.
-  Cada slider tiene el rango del límite de ese motor. Requiere pantalla.
+  Nodo teleop_node: barras deslizantes en grados (una por motor) para mandar
+  la orden. Cada slider tiene el rango configurable del límite de ese motor.
+  Parámetros dinámicos:
+    - joint_limits_lower_deg / joint_limits_upper_deg: límites en grados.
+  Requiere pantalla/X.
 
 robot_bringup
   Launch que prende todo de una vez para demostrar la arquitectura. No tiene
@@ -49,15 +61,14 @@ robot_bringup
 teleop_node --/robot/command--> kinematics_node
 kinematics_node --/robot/joint_targets--> control_node
 control_node --/robot/joint_states (interno, robot_interfaces)--> quien sea
-control_node --/robot/joint_commands--> sim_bridge (-> Gazebo)
 control_node --/joint_states (estándar)--> robot_state_publisher --TF--> RViz
+control_node --/robot/joint_commands--> sim_bridge (-> Gazebo)
 cualquiera --/robot/e_stop (Bool)--> control_node (frena)
 
 En simple:
 1. El operador mueve un slider -> sale RobotCommand en /robot/command.
 2. Cinemática lo pasa a consigna por motor (JointTarget) en /robot/joint_targets.
-3. Control lo ejecuta y dice dónde está la pata (JointState) y qué comando manda
-   (JointTarget en /robot/joint_commands).
+3. Control la verifica, aplica límites y publica el estado (JointState).
 4. robot_state_publisher usa /joint_states para calcular los TF y RViz dibuja
    la pata moviéndose.
 5. sim_bridge lleva el comando a Gazebo.
@@ -76,8 +87,19 @@ El ángulo de cada motor se limita en 3 sitios con los MISMOS números:
 - robot_description (URDF): <limit lower=.. upper=..>  -> la verdad física.
 - robot_control (control_node): recorta el comando al límite -> seguridad.
 - robot_teleop (sliders): el rango del slider = el límite -> lo ve el operador.
-Si se cambia un tope, se cambia en los tres. Hoy los números están en
-robot_control (clamp) y robot_teleop (sliders); el URDF los repite.
+
+Hoy los límites se cambian en vivo con:
+  ros2 param set /control_node joint_limits_lower "[-1.5708, -1.5708, -1.5708]"
+  ros2 param set /control_node joint_limits_upper "[1.5708, 1.5708, 1.5708]"
+  ros2 param set /teleop_node joint_limits_lower_deg "[-135.0, -135.0, -135.0]"
+  ros2 param set /teleop_node joint_limits_upper_deg "[135.0, 135.0, 135.0]"
+
+## Modos de control
+
+- verify_mode=True (por defecto): el valor del slider llega directo a RViz,
+  solo con clamp de límites. Sin PID, sin filtros. Para verificación.
+- verify_mode=False: se activa el PID para control avanzado, trayectorias,
+  cinemática inversa, etc.
 
 ## Cómo probar (comandos detallados)
 
@@ -95,17 +117,23 @@ Paso 2 - Encender todo (incluye los sliders). En una terminal:
 
 Paso 3 - Ver que los tópicos circulan (otra terminal, con source):
     ros2 topic list
-    ros2 topic echo /robot/joint_states
+    ros2 topic echo /joint_states
     rqt_graph
   rqt_graph con "Nodes/Topics (all)" muestra la cadena completa.
 
 Paso 4 - Ver la pata en RViz (otra terminal, con source):
     ros2 run rviz2 rviz2
-  En RViz: Global Options -> Fixed Frame: base_link.
+  En RViz: Global Options -> Fixed Frame: Base_link.
   Add -> RobotModel. En RobotModel, Description Topic: /robot_description.
   La pata debe verse entera y moverse al arrastrar los sliders.
 
-Paso 5 - Cerrar: Ctrl+C en cada terminal.
+Paso 5 - Cambiar límites en vivo (sin recompilar):
+    ros2 param set /control_node joint_limits_lower "[-2.356, -2.356, -2.356]"
+    ros2 param set /control_node joint_limits_upper "[2.356, 2.356, 2.356]"
+    ros2 param set /teleop_node joint_limits_lower_deg "[-135.0, -135.0, -135.0]"
+    ros2 param set /teleop_node joint_limits_upper_deg "[135.0, 135.0, 135.0]"
+
+Paso 6 - Cerrar: Ctrl+C en cada terminal.
 
 Si RViz dice "No transform from [hip1]": el control no está publicando
 /joint_states. Confirmar que el bringup corre (Paso 2) y que
@@ -121,7 +149,8 @@ ros2 topic echo /joint_states trae position con datos.
 
 ## Notas
 
-- srv/, action/, worlds/, plugins/, urdf/, rviz/, meshes/ usan .gitme para
-  aparecer en el repo aunque estén vacías; el archivo dice qué va en cada una.
 - num_joints es parámetro: 3 para una pata, 6 para el robot completo. Mismos
   nodos, distinto tamaño.
+- kinem_leg_gen.py implementa la cinemática directa con Denavit-Hartenberg.
+  Funciones: forward_kinematics(q1, q2, q3) y end_effector_position(q1, q2, q3).
+- El URDF original se incluye vía un wrapper xacro para compatibilidad con ROS2.

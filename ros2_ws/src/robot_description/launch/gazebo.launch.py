@@ -17,9 +17,20 @@ def generate_launch_description():
         parameters=[{'robot_description':
                      ParameterValue(robot_description_content, value_type=str)}])
 
-    jsp_gui = Node(
-        package='joint_state_publisher_gui',
-        executable='joint_state_publisher_gui',
-        parameters=[{'use_gui': True}])
+    tf_base = Node(
+        package='tf2_ros',
+        executable='static_transform_publisher',
+        arguments=['0', '0', '0', '0', '0', '0', 'Base_link', 'base_footprint'],
+        output='screen')
 
-    return LaunchDescription([rsp, jsp_gui])
+    spawn_entity = Node(
+        package='gazebo_ros',
+        executable='spawn_entity.py',
+        arguments=[
+            '-entity', 'robot',
+            '-file', xacro_file,
+            '-x', '0', '-y', '0', '-z', '0.0'
+        ],
+        output='screen')
+
+    return LaunchDescription([rsp, tf_base, spawn_entity])

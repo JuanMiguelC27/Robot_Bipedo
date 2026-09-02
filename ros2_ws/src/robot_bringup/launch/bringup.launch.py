@@ -19,7 +19,7 @@ import os
 def generate_launch_description():
     n = LaunchConfiguration('num_joints')
     pkg_desc = get_package_share_directory('robot_description')
-    xacro_file = os.path.join(pkg_desc, 'urdf', 'single_leg.urdf.xacro')
+    xacro_file = os.path.join(pkg_desc, 'urdf', 'Pata_Robo_Parcial_URDF_V1.2.urdf.xacro')
     robot_description = Command(['xacro ', xacro_file])
 
     description = Node(
