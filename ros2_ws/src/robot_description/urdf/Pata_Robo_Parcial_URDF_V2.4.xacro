@@ -1,0 +1,494 @@
+<?xml version="1.0" encoding="utf-8"?>
+
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro"
+       name="Pata_Robo_Parcial">
+
+  <!-- ========================================================= -->
+  <!-- PROPIEDADES -->
+  <!-- ========================================================= -->
+
+  <!-- Nombre del paquete que contiene las mallas -->
+  <xacro:property name="robot_name" value="Pata_Robo_Parcial_URDF_V2.4"/>
+  <xacro:property name="mesh_dir"
+                  value="package://robot_description/meshes"/>
+
+  <!-- Colores -->
+  <material name="gray">
+    <color rgba="0.89412 0.89412 0.89412 1"/>
+  </material>
+
+  <material name="blue_gray">
+    <color rgba="0.79216 0.81961 0.92941 1"/>
+  </material>
+
+
+  <!-- ========================================================= -->
+  <!-- BASE -->
+  <!-- ========================================================= -->
+
+  <link name="Base_link">
+
+    <inertial>
+      <origin
+        xyz="0.73582 0.2004 -6.6906E-07"
+        rpy="0 0 0"/>
+
+      <mass value="26.069"/>
+
+      <inertia
+        ixx="0.7959"
+        ixy="7.8496E-14"
+        ixz="-1.68E-14"
+        iyy="2.1151"
+        iyz="-1.3268E-08"
+        izz="1.47"/>
+    </inertial>
+
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+
+      <geometry>
+        <mesh filename="${mesh_dir}/Base_link.STL"/>
+      </geometry>
+
+      <material name="gray"/>
+    </visual>
+
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+
+      <geometry>
+        <mesh filename="${mesh_dir}/Base_link.STL"/>
+      </geometry>
+    </collision>
+
+  </link>
+
+
+  <!-- ========================================================= -->
+  <!-- LEFT HIP ROLL -->
+  <!-- ========================================================= -->
+
+  <joint
+    name="Left_Hip_Roll_Joint"
+    type="revolute">
+
+    <origin
+      xyz="0 0.4008 0"
+      rpy="0 0 0"/>
+
+    <parent link="Base_link"/>
+    <child link="Left_Hip_Roll_Link"/>
+
+    <axis xyz="0 0 1"/>
+
+    <limit
+      lower="-1.4835"
+      upper="1.1345"
+      effort="100"
+      velocity="100"/>
+
+  </joint>
+
+
+  <link name="Left_Hip_Roll_Link">
+
+    <inertial>
+
+      <origin
+        xyz="0.0421 0.042369 -0.00021766"
+        rpy="0 0 0"/>
+
+      <mass value="0.19411"/>
+
+      <inertia
+        ixx="7.1048E-05"
+        ixy="-1.8487E-05"
+        ixz="-7.1457E-08"
+        iyy="7.0844E-05"
+        iyz="-7.2372E-08"
+        izz="8.9433E-05"/>
+
+    </inertial>
+
+    <visual>
+
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+
+      <geometry>
+        <mesh filename="${mesh_dir}/Left_Hip_Roll_Link.STL"/>
+      </geometry>
+
+      <material name="gray"/>
+
+    </visual>
+
+    <collision>
+
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+
+      <geometry>
+        <mesh filename="${mesh_dir}/Left_Hip_Roll_Link.STL"/>
+      </geometry>
+
+    </collision>
+
+  </link>
+
+
+  <!-- ========================================================= -->
+  <!-- LEFT HIP PITCH -->
+  <!-- ========================================================= -->
+
+  <joint
+    name="Left_Hip_Pitch_Joint"
+    type="revolute">
+
+    <origin
+      xyz="0.084464 0.084464 0"
+      rpy="-1.5708 0 0.7854"/>
+
+    <parent link="Left_Hip_Roll_Link"/>
+    <child link="Left_Hip_Pitch_Link"/>
+
+    <axis xyz="0 0 1"/>
+
+    <limit
+      lower="-2.0071"
+      upper="2.0071"
+      effort="100"
+      velocity="100"/>
+
+  </joint>
+
+
+  <link name="Left_Hip_Pitch_Link">
+
+    <inertial>
+
+      <origin
+        xyz="0.12138 0.00022499 0.00023024"
+        rpy="0 0 0"/>
+
+      <mass value="0.21754"/>
+
+      <inertia
+        ixx="0.00017367"
+        ixy="8.6938E-10"
+        ixz="-8.5355E-09"
+        iyy="0.00053617"
+        iyz="-2.8312E-09"
+        izz="0.00039504"/>
+
+    </inertial>
+
+    <visual>
+
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+
+      <geometry>
+        <mesh filename="${mesh_dir}/Left_Hip_Pitch_Link.STL"/>
+      </geometry>
+
+      <material name="blue_gray"/>
+
+    </visual>
+
+    <collision>
+
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+
+      <geometry>
+        <mesh filename="${mesh_dir}/Left_Hip_Pitch_Link.STL"/>
+      </geometry>
+
+    </collision>
+
+  </link>
+
+
+  <!-- ========================================================= -->
+  <!-- LEFT KNEE -->
+  <!-- ========================================================= -->
+
+  <joint
+    name="Left_Knee_Joint"
+    type="revolute">
+
+    <origin
+      xyz="0.23605 0 0"
+      rpy="-3.1416 0 0"/>
+
+    <parent link="Left_Hip_Pitch_Link"/>
+    <child link="Left_Knee_Link"/>
+
+    <axis xyz="0 0 1"/>
+
+    <limit
+      lower="-2.0071"
+      upper="2.0071"
+      effort="100"
+      velocity="100"/>
+
+  </joint>
+
+
+  <link name="Left_Knee_Link">
+
+    <inertial>
+
+      <origin
+        xyz="0.14444 -0.00089335 -0.00035083"
+        rpy="0 0 0"/>
+
+      <mass value="0.38813"/>
+
+      <inertia
+        ixx="0.00026487"
+        ixy="-8.6976E-07"
+        ixz="-9.1769E-08"
+        iyy="0.00042734"
+        iyz="-1.3112E-09"
+        izz="0.00042054"/>
+
+    </inertial>
+
+    <visual>
+
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+
+      <geometry>
+        <mesh filename="${mesh_dir}/Left_Knee_Link.STL"/>
+      </geometry>
+
+      <material name="gray"/>
+
+    </visual>
+
+    <collision>
+
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+
+      <geometry>
+        <mesh filename="${mesh_dir}/Left_Knee_Link.STL"/>
+      </geometry>
+
+    </collision>
+
+  </link>
+
+
+  <!-- ========================================================= -->
+  <!-- RIGHT HIP ROLL -->
+  <!-- ========================================================= -->
+
+  <joint
+    name="Right_Hip_Roll_Joint"
+    type="revolute">
+
+    <origin
+      xyz="0 0 0"
+      rpy="0 0 0"/>
+
+    <parent link="Base_link"/>
+    <child link="Right_Hip_Roll_Link"/>
+
+    <axis xyz="0 0 -1"/>
+
+    <limit
+      lower="-1.4835"
+      upper="1.1345"
+      effort="100"
+      velocity="100"/>
+
+  </joint>
+
+
+  <link name="Right_Hip_Roll_Link">
+
+    <inertial>
+
+      <origin
+        xyz="0.041988 -0.042051 -0.00014451"
+        rpy="0 0 0"/>
+
+      <mass value="0.19411"/>
+
+      <inertia
+        ixx="7.1028E-05"
+        ixy="1.8487E-05"
+        ixz="-5.8699E-08"
+        iyy="7.0864E-05"
+        iyz="5.7785E-08"
+        izz="8.9433E-05"/>
+
+    </inertial>
+
+    <visual>
+
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+
+      <geometry>
+        <mesh filename="${mesh_dir}/Right_Hip_Roll_Link.STL"/>
+      </geometry>
+
+      <material name="gray"/>
+
+    </visual>
+
+    <collision>
+
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+
+      <geometry>
+        <mesh filename="${mesh_dir}/Right_Hip_Roll_Link.STL"/>
+      </geometry>
+
+    </collision>
+
+  </link>
+
+
+  <!-- ========================================================= -->
+  <!-- RIGHT HIP PITCH -->
+  <!-- ========================================================= -->
+
+  <joint
+    name="Right_Hip_Pitch_Joint"
+    type="revolute">
+
+    <origin
+      xyz="0.08404 -0.08404 0"
+      rpy="-1.5708 0 -0.7854"/>
+
+    <parent link="Right_Hip_Roll_Link"/>
+    <child link="Right_Hip_Pitch_Link"/>
+
+    <axis xyz="0 0 1"/>
+
+    <limit
+      lower="-2.0071"
+      upper="2.0071"
+      effort="100"
+      velocity="100"/>
+
+  </joint>
+
+
+  <link name="Right_Hip_Pitch_Link">
+
+    <inertial>
+
+      <origin
+        xyz="0.12138 9.9987E-05 -0.00049994"
+        rpy="0 0 0"/>
+
+      <mass value="0.21754"/>
+
+      <inertia
+        ixx="0.00017367"
+        ixy="8.6941E-10"
+        ixz="-8.5355E-09"
+        iyy="0.00053617"
+        iyz="-2.8312E-09"
+        izz="0.00039504"/>
+
+    </inertial>
+
+    <visual>
+
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+
+      <geometry>
+        <mesh filename="${mesh_dir}/Right_Hip_Pitch_Link.STL"/>
+      </geometry>
+
+      <material name="gray"/>
+
+    </visual>
+
+    <collision>
+
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+
+      <geometry>
+        <mesh filename="${mesh_dir}/Right_Hip_Pitch_Link.STL"/>
+      </geometry>
+
+    </collision>
+
+  </link>
+
+
+  <!-- ========================================================= -->
+  <!-- RIGHT KNEE -->
+  <!-- ========================================================= -->
+
+  <joint
+    name="Right_Knee_Joint"
+    type="revolute">
+
+    <origin
+      xyz="0.23605 0 0"
+      rpy="-3.1416 0 0"/>
+
+    <parent link="Right_Hip_Pitch_Link"/>
+    <child link="Right_Knee_Link"/>
+
+    <axis xyz="0 0 1"/>
+
+    <limit
+      lower="-2.0071"
+      upper="2.0071"
+      effort="100"
+      velocity="100"/>
+
+  </joint>
+
+
+  <link name="Right_Knee_Link">
+
+    <inertial>
+
+      <origin
+        xyz="0.14492 -0.0007698 0.00070842"
+        rpy="0 0 0"/>
+
+      <mass value="0.38813"/>
+
+      <inertia
+        ixx="0.00026487"
+        ixy="-8.2858E-07"
+        ixz="-9.2642E-08"
+        iyy="0.00042734"
+        iyz="-1.3206E-09"
+        izz="0.00042054"/>
+
+    </inertial>
+
+    <visual>
+
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+
+      <geometry>
+        <mesh filename="${mesh_dir}/Right_Knee_Link.STL"/>
+      </geometry>
+
+      <material name="gray"/>
+
+    </visual>
+
+    <collision>
+
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+
+      <geometry>
+        <mesh filename="${mesh_dir}/Right_Knee_Link.STL"/>
+      </geometry>
+
+    </collision>
+
+  </link>
+
+
+</robot>
