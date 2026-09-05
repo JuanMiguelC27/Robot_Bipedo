@@ -40,9 +40,9 @@ class ControlNode(Node):
         # un offset fisico temporal del motor. Cuando se recalibre, volver a
         # poner -0.34907 aca (y el equivalente en teleop_node.py).
         self.declare_parameter('joint_limits_lower',
-                               [-1.91986, -2.0071, -2.0071])
+                               [-0.261799, -1.5708, -1.5708])
         self.declare_parameter('joint_limits_upper',
-                               [2.2689, 2.0071, 2.0071])
+                               [1.5708, 1.5708, 1.5708])
         # Modo verificacion: True = clamp y publicar directo.
         self.declare_parameter('verify_mode', True)
 

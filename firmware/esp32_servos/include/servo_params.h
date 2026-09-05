@@ -51,9 +51,9 @@ struct ServoParams {
 
 static const ServoParams SERVO_PARAMS[NUM_SERVOS] = {
     // channel, angleHome, angleMin, angleMax, name
-    { 2, 180.0f, 50.0f, 200.0f, "Hip Roll"  },  // Junta 0 -> PWM2
-    { 1, 135.0f, 20.0f, 250.0f, "Hip Pitch" },  // Junta 1 -> PWM1
-    { 0, 135.0f, 20.0f, 250.0f, "Knee"      },  // Junta 2 -> PWM0
+    { 2, 180.0f, 165.0f, 270.0f, "Hip Roll"  },  // Junta 0 -> PWM2
+    { 1, 135.0f, 45.0f, 225.0f, "Hip Pitch" },  // Junta 1 -> PWM1
+    { 0, 135.0f, 45.0f, 225.0f, "Knee"      },  // Junta 2 -> PWM0
 };
 
 #endif

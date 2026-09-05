@@ -29,8 +29,8 @@ class GuiNode(Node):
         # relanzar para que el slider ya dibujado tome el rango nuevo).
         # Hoy: cadera-roll con offset fisico temporal de -110 (ver
         # control_node.py); el resto coincide con el limite real del URDF.
-        self.declare_parameter('joint_limits_lower_deg', [-110.0, -115.0, -115.0])
-        self.declare_parameter('joint_limits_upper_deg', [130.0, 115.0, 115.0])
+        self.declare_parameter('joint_limits_lower_deg', [-15.0, -90.0, -90.0])
+        self.declare_parameter('joint_limits_upper_deg', [90.0, 90.0, 90.0])
         # Debe coincidir con home_angle[] en firmware/esp32_servos/src/main.cpp.
         # slider = 0 -> el servo queda exactamente en este angulo fisico.
         self.declare_parameter('home_angle_deg', [180.0, 135.0, 135.0])
