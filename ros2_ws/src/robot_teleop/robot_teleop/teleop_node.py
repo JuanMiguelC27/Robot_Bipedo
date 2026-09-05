@@ -22,11 +22,15 @@ class GuiNode(Node):
         super().__init__('teleop_node')
         self.declare_parameter('num_joints', 3)
         # Servos de 270° -> rango util -135° a +135° por slider.
-        self.declare_parameter('joint_limits_lower_deg', [-10.0, -105.0, -105.0])
+        self.declare_parameter('joint_limits_lower_deg', [-120.0, -105.0, -105.0])
         self.declare_parameter('joint_limits_upper_deg', [120.0, 105.0, 105.0])
+        # Debe coincidir con home_angle[] en firmware/esp32_servos/src/main.cpp.
+        # slider = 0 -> el servo queda exactamente en este angulo fisico.
+        self.declare_parameter('home_angle_deg', [180.0, 135.0, 135.0])
         self.n = self.get_parameter('num_joints').value
         self.lower_deg = self.get_parameter('joint_limits_lower_deg').value
         self.upper_deg = self.get_parameter('joint_limits_upper_deg').value
+        self.home_angle_deg = self.get_parameter('home_angle_deg').value
         self.declare_parameter('dh_link_lengths', [1.0] * 5)
         self.dh_link_lengths = self.get_parameter('dh_link_lengths').value
 
@@ -178,17 +182,15 @@ class GuiNode(Node):
         self.input_status.configure(text=message, fg='firebrick')
 
     def _map_to_servo_deg(self, joint_deg):
-        """Mapea el grado del slider [lower, upper] al rango del servo [0, 180]."""
+        """Convierte el grado del slider (offset respecto al home) en el
+        angulo fisico absoluto del servo: slider 0 == home_angle_deg[i].
+        Debe reflejar el rango real del servo (0-270 grados fisicos, ver
+        SERVO_ANG_MIN/MAX en firmware/esp32_servos/src/main.cpp)."""
         servo_deg = []
         for i in range(self.n):
-            low = self.lower_deg[i]
-            high = self.upper_deg[i]
-            if high > low:
-                ratio = (joint_deg[i] - low) / (high - low)
-            else:
-                ratio = 0.0
-            ratio = max(0.0, min(1.0, ratio))
-            servo_deg.append(round(ratio * 180.0, 1))
+            physical = self.home_angle_deg[i] + joint_deg[i]
+            physical = max(0.0, min(270.0, physical))
+            servo_deg.append(round(physical, 1))
         return servo_deg
 
     def publish_target(self):
@@ -199,7 +201,8 @@ class GuiNode(Node):
         msg.velocity = [0.0] * self.n
         self.cmd_pub.publish(msg)
 
-        # Publicar tambien a los servos de la ESP32 (grados 0-180)
+        # Publicar tambien a los servos de la ESP32 (grados fisicos 0-270,
+        # offset respecto a home_angle_deg)
         servo_msg = Float32MultiArray()
         servo_msg.data = self._map_to_servo_deg(self.target_deg)
         self.servo_pub.publish(servo_msg)
