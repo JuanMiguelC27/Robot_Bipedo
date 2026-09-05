@@ -9,6 +9,7 @@
 # teleop se quedara esperando la ventana; correr en la maquina del operador.
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
+from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration, Command
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
@@ -20,6 +21,7 @@ def generate_launch_description():
     n = LaunchConfiguration('num_joints')
     pkg_desc = get_package_share_directory('robot_description')
     xacro_file = os.path.join(pkg_desc, 'urdf', 'Pata_Robo_Parcial_URDF_V1.2.urdf.xacro')
+    rviz_config = os.path.join(pkg_desc, 'config', 'robot.rviz')
     robot_description = Command(['xacro ', xacro_file])
 
     description = Node(
@@ -45,7 +47,13 @@ def generate_launch_description():
         name='teleop_node', parameters=[{'num_joints': n}],
         output='screen')
 
+    rviz = Node(
+        package='rviz2', executable='rviz2', name='rviz2',
+        arguments=['-d', rviz_config], output='screen',
+        condition=IfCondition(LaunchConfiguration('use_rviz')))
+
     return LaunchDescription([
         DeclareLaunchArgument('num_joints', default_value='3'),
-        description, kinematics, control, sim, teleop,
+        DeclareLaunchArgument('use_rviz', default_value='true'),
+        description, kinematics, control, sim, teleop, rviz,
     ])

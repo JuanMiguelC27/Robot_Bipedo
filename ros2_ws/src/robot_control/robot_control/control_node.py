@@ -42,6 +42,8 @@ class ControlNode(Node):
             JointState, '/robot/joint_states', 10)
         self.std_pub = self.create_publisher(
             SensorJointState, '/joint_states', 10)
+        self.cmd_pub = self.create_publisher(
+            JointTarget, '/robot/joint_commands', 10)
         self.estop_sub = self.create_subscription(
             Bool, '/robot/e_stop', self.on_estop, 10)
         self.timer = self.create_timer(0.02, self.control_loop)
@@ -119,8 +121,6 @@ class ControlNode(Node):
         cmd = JointTarget()
         cmd.position = list(state.position)
         cmd.velocity = [0.0] * self.n
-        self.cmd_pub = self.create_publisher(
-            JointTarget, '/robot/joint_commands', 10)
         self.cmd_pub.publish(cmd)
 
     def publish_std(self, position, effort):

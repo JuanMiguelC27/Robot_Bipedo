@@ -4,6 +4,17 @@
      For more information, please see http://wiki.ros.org/sw_urdf_exporter -->
 <robot
   name="Pata_Robo_Parcial_URDF_V1.2">
+  <!--
+    Marco global de visualizacion. El CAD fue exportado con la longitud de la
+    pierna sobre el eje X; esta rotacion la coloca vertical en RViz, con la
+    base abajo, sin cambiar la cinematica ni los ejes de las articulaciones.
+  -->
+  <link name="world" />
+  <joint name="world_to_base" type="fixed">
+    <parent link="world" />
+    <child link="Base_link" />
+    <origin xyz="0 0 1.008062" rpy="0 1.57079632679 0" />
+  </joint>
   <link
     name="Base_link">
     <inertial>
