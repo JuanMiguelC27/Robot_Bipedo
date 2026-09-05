@@ -20,11 +20,27 @@ class ControlNode(Node):
     def __init__(self):
         super().__init__('control_node')
         self.declare_parameter('num_joints', 3)
+        # Default = pierna derecha (Right_Hip_Roll/Pitch + Right_Knee, ver
+        # robot_description/urdf/urdf_der). bringup_izq.launch.py sobreescribe
+        # esto con los joints Left_* al lanzar la pata izquierda.
         self.declare_parameter('joint_names',
-                               ['Hip_Joint', 'Knee_Joint', 'Ankle_Joint'])
-        # Limites en RADIANES. Cambiables en vivo con ros2 param set.
+                               ['Right_Hip_Roll_Joint', 'Right_Hip_Pitch_Joint',
+                                'Right_Knee_Joint'])
+        # Limite INTERNO real del motor, en RADIANES. Ya no lo sobreescribe
+        # bringup_*.launch.py: este .py es la unica fuente de verdad (igual
+        # para ambas patas, solo cambia el signo del eje segun el lado, no el
+        # limite). Es un clamp de seguridad puertas adentro: el operador no
+        # lo ve ni lo toca desde la interfaz (eso lo hace robot_teleop, ver
+        # joint_limits_lower_deg/upper_deg en teleop_node.py, que debe reflejar
+        # estos mismos valores en grados).
+        # Para cambiarlo: editar estas listas, o "ros2 param set /control_node
+        # joint_limits_lower/upper '[...]'" en vivo (se relee cada ciclo).
+        # cadera-roll (indice 0) hoy NO es el limite nominal del URDF
+        # (-0.34907 rad / -20 grados): esta en -1.91986 rad (-110 grados) por
+        # un offset fisico temporal del motor. Cuando se recalibre, volver a
+        # poner -0.34907 aca (y el equivalente en teleop_node.py).
         self.declare_parameter('joint_limits_lower',
-                               [-1.5708, -1.5708, -1.5708])
+                               [-0.261799, -1.5708, -1.5708])
         self.declare_parameter('joint_limits_upper',
                                [1.5708, 1.5708, 1.5708])
         # Modo verificacion: True = clamp y publicar directo.
@@ -42,6 +58,8 @@ class ControlNode(Node):
             JointState, '/robot/joint_states', 10)
         self.std_pub = self.create_publisher(
             SensorJointState, '/joint_states', 10)
+        self.cmd_pub = self.create_publisher(
+            JointTarget, '/robot/joint_commands', 10)
         self.estop_sub = self.create_subscription(
             Bool, '/robot/e_stop', self.on_estop, 10)
         self.timer = self.create_timer(0.02, self.control_loop)
@@ -119,8 +137,6 @@ class ControlNode(Node):
         cmd = JointTarget()
         cmd.position = list(state.position)
         cmd.velocity = [0.0] * self.n
-        self.cmd_pub = self.create_publisher(
-            JointTarget, '/robot/joint_commands', 10)
         self.cmd_pub.publish(cmd)
 
     def publish_std(self, position, effort):
