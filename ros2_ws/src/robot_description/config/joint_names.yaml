@@ -1,1 +1,7 @@
-controller_joint_names: ['', 'Hip_Joint', 'Knee_Joint', 'Ankle_Joint', ]
+# Nombres reales de los joints de cada pata (URDF v2.x, sin ankle).
+# Actualizado tras migrar de la pata generica (Hip_Joint/Knee_Joint/Ankle_Joint)
+# a los dos URDF por lado. robot_control sigue usando por defecto los nombres
+# viejos como parametro 'joint_names' (fuera del alcance de robot_description);
+# pasarle uno de estos dos arreglos segun la pata que se este probando.
+controller_joint_names_der: ['Right_Hip_Roll_Joint', 'Right_Hip_Pitch_Joint', 'Right_Knee_Joint']
+controller_joint_names_izq: ['Left_Hip_Roll_Joint', 'Left_Hip_Pitch_Joint', 'Left_Knee_Joint']

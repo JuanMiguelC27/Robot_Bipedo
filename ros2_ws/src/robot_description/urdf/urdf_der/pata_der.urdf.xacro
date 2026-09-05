@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<robot name="pata_der" xmlns:xacro="http://www.ros.org/wiki/xacro">
+  <!--
+    Wrapper xacro para la pata derecha (Pata_Der_Robo_Parcial_URDF_V2.2).
+    El CAD fue exportado con la longitud de la pierna sobre el eje X; esta
+    rotacion la coloca vertical en RViz, con la base arriba, sin cambiar la
+    cinematica ni los ejes de las articulaciones (igual que el wrapper que
+    usaba la version anterior de una sola pata).
+  -->
+  <link name="world" />
+  <joint name="world_to_base" type="fixed">
+    <parent link="world" />
+    <child link="Base_link" />
+    <origin xyz="0 0 0" rpy="0 1.57079632679 0" />
+  </joint>
+
+  <xacro:include filename="$(find robot_description)/urdf/urdf_der/Pata_Der_Robo_Parcial_URDF_V2.2.urdf" />
+</robot>

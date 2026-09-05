@@ -18,7 +18,7 @@
 //  Valores nominales del servo RDS51150
 //  (CALIBRAR DESPUÉS con el proyecto de calibración)
 // ============================================================
-#define OSC_FREQ_HZ      25000000.0f  // Oscilador PCA9685 (nominal)
+#define OSC_FREQ_HZ      26492928.0f  // Oscilador PCA9685 (nominal)
 #define US_PER_DEG       7.4074f      // us por grado (nominal)
 #define US0              500.0f       // us en 0 grados (nominal)
 

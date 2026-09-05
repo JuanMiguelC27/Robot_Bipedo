@@ -8,7 +8,7 @@ import os
 
 def generate_launch_description():
     pkg = get_package_share_directory('robot_description')
-    xacro_file = os.path.join(pkg, 'urdf', 'Pata_Robo_Parcial_URDF_V1.2.urdf.xacro')
+    xacro_file = os.path.join(pkg, 'urdf', 'urdf_der', 'pata_der.urdf.xacro')
     robot_description_content = Command(['xacro ', xacro_file])
 
     rsp = Node(
@@ -22,9 +22,4 @@ def generate_launch_description():
         executable='joint_state_publisher_gui',
         parameters=[{'use_gui': True}])
 
-    rviz = Node(
-        package='rviz2',
-        executable='rviz2',
-        output='screen')
-
-    return LaunchDescription([rsp, jsp_gui, rviz])
+    return LaunchDescription([rsp, jsp_gui])

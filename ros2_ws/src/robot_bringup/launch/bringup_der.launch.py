@@ -1,12 +1,15 @@
-# Levanta TODOS los nodos del flujo para evidenciar la arquitectura:
-#   robot_state_publisher (description) -> publica /robot_description + TF
+# Levanta el flujo completo para probar SOLO la pierna derecha:
+#   robot_state_publisher (pata_der.urdf.xacro) -> publica /robot_description + TF
 #   kinematics_node  -> /robot/command -> /robot/joint_targets
 #   control_node     -> /robot/joint_targets -> /robot/joint_states + /robot/joint_commands
 #   sim_bridge       -> /robot/joint_commands -> /joint_group_position_controller/commands
-#   teleop_node      -> SLIDERS (fuente de /robot/command; requiere pantalla/X)
-# Nota: se quito test_injector para que los sliders sean la unica fuente de
-# consigna y no peleen por /robot/command. En un servidor sin display el
-# teleop se quedara esperando la ventana; correr en la maquina del operador.
+#   teleop_node      -> SLIDERS + textbox (fuente de /robot/command; requiere pantalla/X)
+# Usa los MISMOS nombres de nodo/topico que la version de una sola pata (no
+# hay namespacing): correr esto y bringup_izq.launch.py al mismo tiempo haria
+# que se pisen los topicos. Se pensaron para correr una pata a la vez.
+# El puente serial con la ESP32 (robot_serial_bridge) no esta aqui: se corre
+# aparte, a mano, apuntando al puerto de la ESP32 de esta pata:
+#   ros2 run robot_serial_bridge serial_bridge -p port:=/dev/ttyUSBx
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.conditions import IfCondition
@@ -16,11 +19,19 @@ from launch_ros.parameter_descriptions import ParameterValue
 from ament_index_python.packages import get_package_share_directory
 import os
 
+# Nombres reales de los joints de la pierna derecha (esto SI cambia por
+# pata: son los joints que existen en pata_der.urdf.xacro). Los limites
+# articulares NO se fijan aca: viven adentro de cada nodo (control_node.py
+# = limite interno en radianes, teleop_node.py = limite visual en grados) y
+# son iguales para las dos patas, asi que no hace falta pasarlos por launch.
+# Para cambiarlos: editar el .py de ese nodo, o "ros2 param set" en vivo.
+JOINT_NAMES = ['Right_Hip_Roll_Joint', 'Right_Hip_Pitch_Joint', 'Right_Knee_Joint']
+
 
 def generate_launch_description():
     n = LaunchConfiguration('num_joints')
     pkg_desc = get_package_share_directory('robot_description')
-    xacro_file = os.path.join(pkg_desc, 'urdf', 'Pata_Robo_Parcial_URDF_V1.2.urdf.xacro')
+    xacro_file = os.path.join(pkg_desc, 'urdf', 'urdf_der', 'pata_der.urdf.xacro')
     rviz_config = os.path.join(pkg_desc, 'config', 'robot.rviz')
     robot_description = Command(['xacro ', xacro_file])
 
@@ -36,7 +47,13 @@ def generate_launch_description():
 
     control = Node(
         package='robot_control', executable='control_node',
-        name='control_node', parameters=[{'num_joints': n}])
+        name='control_node',
+        parameters=[{
+            'num_joints': n,
+            'joint_names': JOINT_NAMES,
+            # joint_limits_lower/upper NO se pasan aca: los define
+            # control_node.py (limite interno real del motor).
+        }])
 
     sim = Node(
         package='robot_simulation', executable='sim_bridge',
@@ -44,7 +61,12 @@ def generate_launch_description():
 
     teleop = Node(
         package='robot_teleop', executable='teleop_node',
-        name='teleop_node', parameters=[{'num_joints': n}],
+        name='teleop_node',
+        parameters=[{
+            'num_joints': n,
+            # joint_limits_lower_deg/upper_deg NO se pasan aca: los define
+            # teleop_node.py (limite visual: rango del slider + textbox).
+        }],
         output='screen')
 
     rviz = Node(

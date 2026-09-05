@@ -21,9 +21,16 @@ class GuiNode(Node):
     def __init__(self):
         super().__init__('teleop_node')
         self.declare_parameter('num_joints', 3)
-        # Servos de 270° -> rango util -135° a +135° por slider.
-        self.declare_parameter('joint_limits_lower_deg', [-120.0, -105.0, -105.0])
-        self.declare_parameter('joint_limits_upper_deg', [120.0, 105.0, 105.0])
+        # Limite VISUAL (slider + textbox): en grados, debe reflejar el mismo
+        # limite fisico real que control_node.py tiene en radianes
+        # (joint_limits_lower/upper). Ya no lo sobreescribe bringup_*.launch.py:
+        # si recalibras el motor y cambias control_node.py, cambia esto tambien
+        # a mano (o via "ros2 param set /teleop_node ... ", pero eso exige
+        # relanzar para que el slider ya dibujado tome el rango nuevo).
+        # Hoy: cadera-roll con offset fisico temporal de -110 (ver
+        # control_node.py); el resto coincide con el limite real del URDF.
+        self.declare_parameter('joint_limits_lower_deg', [-110.0, -115.0, -115.0])
+        self.declare_parameter('joint_limits_upper_deg', [130.0, 115.0, 115.0])
         # Debe coincidir con home_angle[] en firmware/esp32_servos/src/main.cpp.
         # slider = 0 -> el servo queda exactamente en este angulo fisico.
         self.declare_parameter('home_angle_deg', [180.0, 135.0, 135.0])

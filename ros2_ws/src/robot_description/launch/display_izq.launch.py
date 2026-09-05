@@ -8,7 +8,8 @@ import os
 
 def generate_launch_description():
     pkg = get_package_share_directory('robot_description')
-    xacro_file = os.path.join(pkg, 'urdf', 'Pata_Robo_Parcial_URDF_V1.2.urdf.xacro')
+    xacro_file = os.path.join(pkg, 'urdf', 'urdf_izq', 'pata_izq.urdf.xacro')
+    rviz_config = os.path.join(pkg, 'config', 'robot.rviz')
     robot_description_content = Command(['xacro ', xacro_file])
 
     rsp = Node(
@@ -17,20 +18,15 @@ def generate_launch_description():
         parameters=[{'robot_description':
                      ParameterValue(robot_description_content, value_type=str)}])
 
-    tf_base = Node(
-        package='tf2_ros',
-        executable='static_transform_publisher',
-        arguments=['0', '0', '0', '0', '0', '0', 'Base_link', 'base_footprint'],
+    jsp_gui = Node(
+        package='joint_state_publisher_gui',
+        executable='joint_state_publisher_gui',
+        parameters=[{'use_gui': True}])
+
+    rviz = Node(
+        package='rviz2',
+        executable='rviz2',
+        arguments=['-d', rviz_config],
         output='screen')
 
-    spawn_entity = Node(
-        package='gazebo_ros',
-        executable='spawn_entity.py',
-        arguments=[
-            '-entity', 'robot',
-            '-file', xacro_file,
-            '-x', '0', '-y', '0', '-z', '0.0'
-        ],
-        output='screen')
-
-    return LaunchDescription([rsp, tf_base, spawn_entity])
+    return LaunchDescription([rsp, jsp_gui, rviz])

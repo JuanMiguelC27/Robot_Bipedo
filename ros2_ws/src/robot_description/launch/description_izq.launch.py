@@ -8,7 +8,7 @@ import os
 
 def generate_launch_description():
     pkg = get_package_share_directory('robot_description')
-    xacro_file = os.path.join(pkg, 'urdf', 'Pata_Robo_Parcial_URDF_V1.2.urdf.xacro')
+    xacro_file = os.path.join(pkg, 'urdf', 'urdf_izq', 'pata_izq.urdf.xacro')
     robot_description_content = Command(['xacro ', xacro_file])
 
     rsp = Node(
