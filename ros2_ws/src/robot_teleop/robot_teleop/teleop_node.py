@@ -45,19 +45,6 @@ from tkinter import ttk
 # ------------------------------------------------------------
 # IMPORTACIÓN DE CINEMÁTICA
 # ------------------------------------------------------------
-#
-# Estas funciones pertenecen al paquete robot_kinematics.
-#
-# forward_kinematics_right(q)
-#     -> Calcula las matrices de la pierna derecha.
-#
-# forward_kinematics_left(q)
-#     -> Calcula las matrices de la pierna izquierda.
-#
-# get_position(T)
-#     -> Extrae X, Y, Z de una matriz homogénea.
-#
-# ------------------------------------------------------------
 
 from robot_kinematics.kinem_leg_gen import (
     forward_kinematics_right,
@@ -84,15 +71,6 @@ class TeleopNode(Node):
         # ----------------------------------------------------
         # PARÁMETROS ROS 2
         # ----------------------------------------------------
-        #
-        # leg_side:
-        #   Permite utilizar este mismo nodo para cualquiera
-        #   de las dos piernas.
-        #
-        # num_joints:
-        #   Número de articulaciones controladas por la GUI.
-        #
-        # ----------------------------------------------------
 
         self.declare_parameter(
             'leg_side',
@@ -103,7 +81,6 @@ class TeleopNode(Node):
             'num_joints',
             3
         )
-
 
         self.leg_side = (
             self.get_parameter('leg_side')
@@ -155,19 +132,6 @@ class TeleopNode(Node):
         # ----------------------------------------------------
         # LÍMITES VISUALES / DE ENTRADA
         # ----------------------------------------------------
-        #
-        # Estos límites se utilizan para:
-        #
-        #   - los sliders
-        #   - las entradas manuales
-        #   - la validación de datos de la GUI
-        #
-        # La cinemática NO limita los valores.
-        #
-        # Los límites de seguridad del control físico deben
-        # permanecer en el nodo de control y/o firmware.
-        #
-        # ----------------------------------------------------
 
         self.lower_deg = [
             -15.0,    # Hip Roll
@@ -179,6 +143,17 @@ class TeleopNode(Node):
             90.0,     # Hip Roll
             90.0,     # Hip Pitch
             90.0      # Knee Pitch
+        ]
+
+
+        # ----------------------------------------------------
+        # OFFSETS DE LOS SERVOS
+        # ----------------------------------------------------
+
+        self.servo_offset_deg = [
+            180.0,    # Hip Roll
+            135.0,    # Hip Pitch
+            135.0     # Knee
         ]
 
 
@@ -202,20 +177,8 @@ class TeleopNode(Node):
         # ====================================================
         # VARIABLES DE CINEMÁTICA
         # ====================================================
-        #
-        # Aquí almacenaremos:
-        #
-        #   T01
-        #   T02
-        #   T03
-        #   T04
-        #
-        # generadas por la función de cinemática.
-        #
-        # ====================================================
 
         self.transforms = []
-
 
         # MTH seleccionada actualmente.
 
@@ -235,8 +198,8 @@ class TeleopNode(Node):
         )
 
 
-        # Publicador utilizado para enviar los ángulos a los
-        # servos en grados.
+        # Publicador utilizado para enviar los ángulos
+        # a los servos en grados.
 
         self.servo_pub = self.create_publisher(
             Float32MultiArray,
@@ -270,14 +233,6 @@ class TeleopNode(Node):
 
         # ----------------------------------------------------
         # Tamaño inicial de la ventana
-        # ----------------------------------------------------
-        #
-        # Antes había bastante espacio vacío debajo del bloque
-        # de posición.
-        #
-        # Ahora dejamos que Tkinter ajuste la ventana a los
-        # elementos realmente utilizados.
-        #
         # ----------------------------------------------------
 
         self.root.geometry("650x700")
@@ -386,8 +341,6 @@ class TeleopNode(Node):
 
         for i in range(self.num_joints):
 
-            # Nombre de la articulación.
-
             name_label = ttk.Label(
                 joints_frame,
                 text=self.joint_names[i],
@@ -409,18 +362,12 @@ class TeleopNode(Node):
 
             slider = tk.Scale(
                 joints_frame,
-
                 from_=self.lower_deg[i],
                 to=self.upper_deg[i],
-
                 orient='horizontal',
-
                 resolution=0.1,
-
                 showvalue=False,
-
                 length=350,
-
                 command=lambda value, index=i:
                     self.on_slider_change(
                         index,
@@ -491,7 +438,6 @@ class TeleopNode(Node):
 
         self.entries = []
 
-
         for i in range(self.num_joints):
 
             label = ttk.Label(
@@ -551,17 +497,6 @@ class TeleopNode(Node):
 
         # ====================================================
         # MENSAJE DE ESTADO
-        # ====================================================
-        #
-        # Este mensaje reemplaza al texto que anteriormente
-        # aparecía al final de toda la ventana.
-        #
-        # Rojo:
-        #     Error de validación.
-        #
-        # Verde:
-        #     Ángulos aplicados correctamente.
-        #
         # ====================================================
 
         self.status_label = tk.Label(
@@ -778,13 +713,6 @@ class TeleopNode(Node):
         # ====================================================
         # ACTUALIZACIÓN PERIÓDICA DE LA GUI
         # ====================================================
-        #
-        # Tkinter necesita actualizar periódicamente la
-        # información recibida desde ROS 2.
-        #
-        # 50 ms = aproximadamente 20 actualizaciones/s.
-        #
-        # ====================================================
 
         self.root.after(
             50,
@@ -811,12 +739,6 @@ class TeleopNode(Node):
         index,
         value
     ):
-        """
-        Se ejecuta cada vez que el usuario mueve un slider.
-
-        El valor recibido por Tkinter es un string, por lo que
-        primero lo convertimos a float.
-        """
 
         try:
             value = float(value)
@@ -830,8 +752,7 @@ class TeleopNode(Node):
         self.target_deg[index] = value
 
 
-        # Actualizamos el texto que aparece a la derecha
-        # del slider.
+        # Actualizamos el texto del slider.
 
         self.slider_labels[index].config(
             text=f"{value:.1f}°"
@@ -866,16 +787,6 @@ class TeleopNode(Node):
     # ========================================================
 
     def apply_entry_angles(self):
-        """
-        Lee los valores introducidos manualmente y los valida.
-
-        IMPORTANTE:
-        Si un solo valor es incorrecto, NO se modifica ningún
-        slider y NO se publica ningún comando.
-
-        Esto evita que un valor inválido sea automáticamente
-        llevado al límite mediante clamp.
-        """
 
         # ----------------------------------------------------
         # 1. Intentamos convertir todos los campos a float.
@@ -887,15 +798,12 @@ class TeleopNode(Node):
                 float(
                     self.entries[i].get()
                 )
-
                 for i in range(
                     self.num_joints
                 )
             ]
 
         except ValueError:
-
-            # Uno de los campos no contiene un número válido.
 
             self.set_status(
                 "Error: todos los ángulos deben ser valores numéricos.",
@@ -907,13 +815,6 @@ class TeleopNode(Node):
 
         # ----------------------------------------------------
         # 2. VALIDAMOS LOS LÍMITES
-        # ----------------------------------------------------
-        #
-        # Se revisan todos los valores antes de modificar
-        # cualquier elemento de la interfaz.
-        #
-        # Si uno está fuera de rango, se cancela toda
-        # la operación.
         # ----------------------------------------------------
 
         for i, value in enumerate(values):
@@ -989,17 +890,6 @@ class TeleopNode(Node):
         message,
         color
     ):
-        """
-        Actualiza el mensaje de estado de la interfaz.
-
-        Parámetros:
-            message -> texto que se mostrará.
-            color   -> color del texto.
-
-        Colores utilizados:
-            red   -> error
-            green -> operación correcta
-        """
 
         self.status_label.config(
             text=message,
@@ -1012,16 +902,6 @@ class TeleopNode(Node):
     # ========================================================
 
     def publish_target(self):
-        """
-        Publica los ángulos objetivo.
-
-        RobotCommand:
-            Se envían los ángulos en RADIANES.
-
-        Float32MultiArray:
-            Se envían los ángulos en GRADOS para la interfaz
-            de comunicación con los servos.
-        """
 
         # ----------------------------------------------------
         # Conversión grados -> radianes
@@ -1041,7 +921,6 @@ class TeleopNode(Node):
 
         command_msg.position = angles_rad
 
-
         self.command_pub.publish(
             command_msg
         )
@@ -1054,10 +933,14 @@ class TeleopNode(Node):
         servo_msg = Float32MultiArray()
 
         servo_msg.data = [
-            float(angle)
-            for angle in self.target_deg
+            float(
+                self.target_deg[i]
+                + self.servo_offset_deg[i]
+            )
+            for i in range(
+                self.num_joints
+            )
         ]
-
 
         self.servo_pub.publish(
             servo_msg
@@ -1069,19 +952,6 @@ class TeleopNode(Node):
     # ========================================================
 
     def update_kinematics(self):
-        """
-        Calcula la cinemática directa de la pierna seleccionada.
-
-        Si:
-            leg_side == "right"
-                -> utiliza forward_kinematics_right()
-
-        Si:
-            leg_side == "left"
-                -> utiliza forward_kinematics_left()
-
-        La función recibe los ángulos en grados.
-        """
 
         q = self.target_deg.copy()
 
@@ -1115,10 +985,6 @@ class TeleopNode(Node):
     # ========================================================
 
     def update_kinematics_display(self):
-        """
-        Actualiza la matriz homogénea seleccionada y la
-        posición X, Y, Z.
-        """
 
         # ----------------------------------------------------
         # Si todavía no hay matrices calculadas, no hacemos
@@ -1178,7 +1044,6 @@ class TeleopNode(Node):
 
         position = get_position(T)
 
-
         x = position[0]
         y = position[1]
         z = position[2]
@@ -1205,15 +1070,10 @@ class TeleopNode(Node):
         self,
         event=None
     ):
-        """
-        Se ejecuta cuando el usuario selecciona otra MTH
-        desde el ComboBox.
-        """
 
         self.selected_mth = (
             self.mth_selector.get()
         )
-
 
         self.update_kinematics_display()
 
@@ -1226,17 +1086,6 @@ class TeleopNode(Node):
         self,
         msg
     ):
-        """
-        Callback ejecutado cuando llega información por:
-
-            /robot/joint_states
-
-        Se asume que los valores recibidos están expresados
-        en radianes.
-
-        Internamente los convertimos a grados para mostrar
-        la información en la GUI.
-        """
 
         try:
 
@@ -1267,13 +1116,6 @@ class TeleopNode(Node):
     # ========================================================
 
     def refresh(self):
-        """
-        Actualiza periódicamente la información visual.
-
-        Tkinter debe modificarse desde su hilo principal,
-        por eso no actualizamos directamente los widgets
-        desde el callback de ROS.
-        """
 
         # ----------------------------------------------------
         # Aquí podemos reflejar información recibida desde
@@ -1291,9 +1133,6 @@ class TeleopNode(Node):
     # ========================================================
 
     def on_close(self):
-        """
-        Cierra correctamente la interfaz y el nodo ROS 2.
-        """
 
         try:
 
@@ -1339,9 +1178,6 @@ def main(args=None):
 
     # --------------------------------------------------------
     # ROS 2 se ejecuta en un hilo separado.
-    #
-    # Esto es necesario porque Tkinter necesita mantener
-    # su propio mainloop() en el hilo principal.
     # --------------------------------------------------------
 
     ros_thread = threading.Thread(
@@ -1376,12 +1212,14 @@ def main(args=None):
 
             try:
                 rclpy.shutdown()
+
             except Exception:
                 pass
 
 
         try:
             node.destroy_node()
+
         except Exception:
             pass
 
