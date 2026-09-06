@@ -1,81 +1,350 @@
-# Levanta el flujo completo para probar SOLO la pierna derecha:
-#   robot_state_publisher (pata_der.urdf.xacro) -> publica /robot_description + TF
-#   kinematics_node  -> /robot/command -> /robot/joint_targets
-#   control_node     -> /robot/joint_targets -> /robot/joint_states + /robot/joint_commands
-#   sim_bridge       -> /robot/joint_commands -> /joint_group_position_controller/commands
-#   teleop_node      -> SLIDERS + textbox (fuente de /robot/command; requiere pantalla/X)
-# Usa los MISMOS nombres de nodo/topico que la version de una sola pata (no
-# hay namespacing): correr esto y bringup_izq.launch.py al mismo tiempo haria
-# que se pisen los topicos. Se pensaron para correr una pata a la vez.
-# El puente serial con la ESP32 (robot_serial_bridge) no esta aqui: se corre
-# aparte, a mano, apuntando al puerto de la ESP32 de esta pata:
-#   ros2 run robot_serial_bridge serial_bridge -p port:=/dev/ttyUSBx
+"""
+Launch completo para probar ÚNICAMENTE la pierna derecha del robot bípedo.
+
+Este launch inicia:
+
+    1. robot_state_publisher
+       - Carga el modelo URDF/Xacro de la pierna derecha.
+       - Publica /robot_description.
+       - Publica las transformaciones TF del robot.
+
+    2. kinematics_node
+       - Recibe los ángulos desde /robot/command.
+       - Calcula/procesa la cinemática.
+       - Publica /robot/joint_targets.
+
+    3. control_node
+       - Recibe /robot/joint_targets.
+       - Aplica los límites de seguridad articulares.
+       - Publica /robot/joint_states.
+       - Publica /robot/joint_commands.
+
+    4. sim_bridge
+       - Conecta los comandos de articulación con la simulación.
+
+    5. teleop_node
+       - Abre la interfaz gráfica.
+       - Permite controlar las tres articulaciones.
+       - Publica /robot/command.
+       - Publica /servo_commands.
+       - Muestra la cinemática directa de la pierna derecha.
+
+    6. RViz2
+       - Visualiza el modelo de la pierna y sus movimientos.
+
+IMPORTANTE:
+    Este launch está pensado para ejecutarse solo con la pierna derecha.
+
+    La pierna derecha y la izquierda utilizan actualmente los mismos
+    nombres de nodos y tópicos, por lo que NO deben ejecutarse ambos
+    bringup simultáneamente sin utilizar namespaces.
+
+La comunicación con la ESP32 mediante robot_serial_bridge NO se inicia
+desde este launch. Ese nodo se ejecuta aparte cuando sea necesario.
+"""
+
+
+# ======================================================================
+# IMPORTACIONES DE ROS 2 LAUNCH
+# ======================================================================
+
 from launch import LaunchDescription
+
 from launch.actions import DeclareLaunchArgument
+
 from launch.conditions import IfCondition
-from launch.substitutions import LaunchConfiguration, Command
+
+from launch.substitutions import (
+    LaunchConfiguration,
+    Command
+)
+
 from launch_ros.actions import Node
-from launch_ros.parameter_descriptions import ParameterValue
-from ament_index_python.packages import get_package_share_directory
+
+from launch_ros.parameter_descriptions import (
+    ParameterValue
+)
+
+from ament_index_python.packages import (
+    get_package_share_directory
+)
+
 import os
 
-# Nombres reales de los joints de la pierna derecha (esto SI cambia por
-# pata: son los joints que existen en pata_der.urdf.xacro). Los limites
-# articulares NO se fijan aca: viven adentro de cada nodo (control_node.py
-# = limite interno en radianes, teleop_node.py = limite visual en grados) y
-# son iguales para las dos patas, asi que no hace falta pasarlos por launch.
-# Para cambiarlos: editar el .py de ese nodo, o "ros2 param set" en vivo.
-JOINT_NAMES = ['Right_Hip_Roll_Joint', 'Right_Hip_Pitch_Joint', 'Right_Knee_Joint']
 
+# ======================================================================
+# CONFIGURACIÓN DE LA PIERNA DERECHA
+# ======================================================================
+
+# Nombres de los joints definidos realmente en el Xacro de la
+# pierna derecha.
+#
+# Estos nombres son importantes para que robot_control y RViz
+# trabajen con las articulaciones correctas.
+
+JOINT_NAMES = [
+    'Right_Hip_Roll_Joint',
+    'Right_Hip_Pitch_Joint',
+    'Right_Knee_Joint'
+]
+
+
+# ======================================================================
+# FUNCIÓN PRINCIPAL DEL LAUNCH
+# ======================================================================
 
 def generate_launch_description():
-    n = LaunchConfiguration('num_joints')
-    pkg_desc = get_package_share_directory('robot_description')
-    xacro_file = os.path.join(pkg_desc, 'urdf', 'urdf_der', 'pata_der.urdf.xacro')
-    rviz_config = os.path.join(pkg_desc, 'config', 'robot.rviz')
-    robot_description = Command(['xacro ', xacro_file])
+
+    # ------------------------------------------------------------------
+    # Parámetro que permite indicar cuántas articulaciones se controlan.
+    #
+    # Para una sola pierna:
+    #
+    #     num_joints = 3
+    #
+    # ------------------------------------------------------------------
+
+    n = LaunchConfiguration(
+        'num_joints'
+    )
+
+
+    # ==================================================================
+    # UBICACIÓN DEL PAQUETE robot_description
+    # ==================================================================
+
+    pkg_desc = get_package_share_directory(
+        'robot_description'
+    )
+
+
+    # ==================================================================
+    # MODELO XACRO DE LA PIERNA DERECHA
+    # ==================================================================
+
+    xacro_file = os.path.join(
+        pkg_desc,
+        'urdf',
+        'urdf_der',
+        'pata_der.urdf.xacro'
+    )
+
+
+    # ------------------------------------------------------------------
+    # Configuración de RViz
+    # ------------------------------------------------------------------
+
+    rviz_config = os.path.join(
+        pkg_desc,
+        'config',
+        'robot.rviz'
+    )
+
+
+    # ------------------------------------------------------------------
+    # Procesar el Xacro para obtener el URDF.
+    #
+    # Command ejecuta:
+    #
+    #     xacro pata_der.urdf.xacro
+    #
+    # y genera el contenido del robot_description.
+    # ------------------------------------------------------------------
+
+    robot_description = Command([
+        'xacro ',
+        xacro_file
+    ])
+
+
+    # ==================================================================
+    # 1. ROBOT STATE PUBLISHER
+    # ==================================================================
 
     description = Node(
         package='robot_state_publisher',
+
         executable='robot_state_publisher',
-        parameters=[{'robot_description':
-                     ParameterValue(robot_description, value_type=str)}])
+
+        name='robot_state_publisher',
+
+        parameters=[
+            {
+                'robot_description':
+                    ParameterValue(
+                        robot_description,
+                        value_type=str
+                    )
+            }
+        ]
+    )
+
+
+    # ==================================================================
+    # 2. NODO DE CINEMÁTICA
+    # ==================================================================
 
     kinematics = Node(
-        package='robot_kinematics', executable='kinematics_node',
-        name='kinematics_node', parameters=[{'num_joints': n}])
+        package='robot_kinematics',
+
+        executable='kinematics_node',
+
+        name='kinematics_node',
+
+        parameters=[
+            {
+                'num_joints': n
+            }
+        ]
+    )
+
+
+    # ==================================================================
+    # 3. NODO DE CONTROL
+    # ==================================================================
 
     control = Node(
-        package='robot_control', executable='control_node',
+        package='robot_control',
+
+        executable='control_node',
+
         name='control_node',
-        parameters=[{
-            'num_joints': n,
-            'joint_names': JOINT_NAMES,
-            # joint_limits_lower/upper NO se pasan aca: los define
-            # control_node.py (limite interno real del motor).
-        }])
+
+        parameters=[
+            {
+                # Número de articulaciones de esta pierna.
+                'num_joints': n,
+
+                # Nombres reales de los joints del URDF derecho.
+                'joint_names': JOINT_NAMES,
+
+                # ------------------------------------------------------
+                # IMPORTANTE:
+                #
+                # NO se pasan aquí los límites articulares.
+                #
+                # Los límites de seguridad están definidos dentro
+                # de control_node.py.
+                #
+                # Esto evita tener varias fuentes diferentes para
+                # los límites del robot.
+                # ------------------------------------------------------
+            }
+        ]
+    )
+
+
+    # ==================================================================
+    # 4. PUENTE CON LA SIMULACIÓN
+    # ==================================================================
 
     sim = Node(
-        package='robot_simulation', executable='sim_bridge',
-        name='sim_bridge', output='screen')
+        package='robot_simulation',
+
+        executable='sim_bridge',
+
+        name='sim_bridge',
+
+        output='screen'
+    )
+
+
+    # ==================================================================
+    # 5. INTERFAZ DE TELEOPERACIÓN
+    # ==================================================================
 
     teleop = Node(
-        package='robot_teleop', executable='teleop_node',
+        package='robot_teleop',
+
+        executable='teleop_node',
+
         name='teleop_node',
-        parameters=[{
-            'num_joints': n,
-            # joint_limits_lower_deg/upper_deg NO se pasan aca: los define
-            # teleop_node.py (limite visual: rango del slider + textbox).
-        }],
-        output='screen')
+
+        parameters=[
+            {
+                # Número de articulaciones controladas.
+                'num_joints': n,
+
+                # ------------------------------------------------------
+                # Indica explícitamente que esta interfaz corresponde
+                # a la PIERNA DERECHA.
+                #
+                # teleop_node.py utiliza este parámetro para:
+                #
+                #   - Mostrar "PIERNA DERECHA" en la interfaz.
+                #   - Utilizar forward_kinematics_right().
+                # ------------------------------------------------------
+                'leg_side': 'right',
+
+                # ------------------------------------------------------
+                # Los límites visuales de los sliders y entradas
+                # manuales se mantienen definidos dentro de
+                # teleop_node.py.
+                #
+                # No se pasan desde este launch.
+                # ------------------------------------------------------
+            }
+        ],
+
+        output='screen'
+    )
+
+
+    # ==================================================================
+    # 6. RVIZ2
+    # ==================================================================
 
     rviz = Node(
-        package='rviz2', executable='rviz2', name='rviz2',
-        arguments=['-d', rviz_config], output='screen',
-        condition=IfCondition(LaunchConfiguration('use_rviz')))
+        package='rviz2',
+
+        executable='rviz2',
+
+        name='rviz2',
+
+        arguments=[
+            '-d',
+            rviz_config
+        ],
+
+        output='screen',
+
+        # RViz puede activarse/desactivarse mediante:
+        #
+        #     use_rviz:=true
+        #
+        # o:
+        #
+        #     use_rviz:=false
+        #
+        condition=IfCondition(
+            LaunchConfiguration('use_rviz')
+        )
+    )
+
+
+    # ==================================================================
+    # RETORNAR TODOS LOS NODOS DEL LAUNCH
+    # ==================================================================
 
     return LaunchDescription([
-        DeclareLaunchArgument('num_joints', default_value='3'),
-        DeclareLaunchArgument('use_rviz', default_value='true'),
-        description, kinematics, control, sim, teleop, rviz,
+
+        # Número de articulaciones.
+        DeclareLaunchArgument(
+            'num_joints',
+            default_value='3'
+        ),
+
+        # Activar RViz por defecto.
+        DeclareLaunchArgument(
+            'use_rviz',
+            default_value='true'
+        ),
+
+        # Nodos.
+        description,
+        kinematics,
+        control,
+        sim,
+        teleop,
+        rviz,
     ])

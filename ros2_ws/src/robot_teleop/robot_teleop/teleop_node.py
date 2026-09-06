@@ -1,249 +1,1232 @@
-# Interfaz de barras deslizantes para teleoperar la pata.
-# Cada slider es una junta: al moverlo publica /robot/command.
-# El operador ve GRADOS; internamente todo se convierte a RADIANES.
+# ============================================================
+# TELEOP NODE - ROBOT BÍPEDO
+# ============================================================
 #
-# Como ROS y tkinter NO pueden correr en el mismo hilo, rclpy.spin va en un
-# hilo aparte (daemon) y la GUI corre en el principal con root.mainloop().
-# Los sliders se refrescan desde el hilo de la GUI con root.after(), no desde
-# el callback de ROS, para que no se trabe (ese era el retardo).
+# Este nodo proporciona una interfaz gráfica en Tkinter para:
+#
+#   1. Controlar las 3 articulaciones de una pierna.
+#   2. Introducir manualmente los ángulos articulares.
+#   3. Publicar los comandos mediante ROS 2.
+#   4. Recibir el estado actual de las articulaciones.
+#   5. Calcular la cinemática directa.
+#   6. Mostrar las matrices homogéneas T01, T02, T03 y T04.
+#   7. Mostrar la posición X, Y, Z del extremo de la cadena.
+#
+# La misma GUI se utiliza para ambas piernas.
+#
+# El parámetro:
+#
+#       leg_side = "right"
+#       leg_side = "left"
+#
+# determina qué cadena cinemática utilizar y qué nombre
+# mostrar en la interfaz.
+#
+# ============================================================
+
+
+# ------------------------------------------------------------
+# IMPORTACIONES
+# ------------------------------------------------------------
+
 import math
 import threading
+
 import rclpy
 from rclpy.node import Node
+
 from robot_interfaces.msg import RobotCommand, JointState
 from std_msgs.msg import Float32MultiArray
+
 import tkinter as tk
+from tkinter import ttk
 
-from robot_teleop.forward_kinematics import end_effector_matrix
+
+# ------------------------------------------------------------
+# IMPORTACIÓN DE CINEMÁTICA
+# ------------------------------------------------------------
+
+from robot_kinematics.kinem_leg_gen import (
+    forward_kinematics_right,
+    forward_kinematics_left,
+    get_position
+)
 
 
-class GuiNode(Node):
+# ============================================================
+# CLASE PRINCIPAL
+# ============================================================
+
+class TeleopNode(Node):
+
     def __init__(self):
+
+        # ----------------------------------------------------
+        # Inicialización del nodo ROS 2
+        # ----------------------------------------------------
+
         super().__init__('teleop_node')
-        self.declare_parameter('num_joints', 3)
-        # Limite VISUAL (slider + textbox): en grados, debe reflejar el mismo
-        # limite fisico real que control_node.py tiene en radianes
-        # (joint_limits_lower/upper). Ya no lo sobreescribe bringup_*.launch.py:
-        # si recalibras el motor y cambias control_node.py, cambia esto tambien
-        # a mano (o via "ros2 param set /teleop_node ... ", pero eso exige
-        # relanzar para que el slider ya dibujado tome el rango nuevo).
-        # Hoy: cadera-roll con offset fisico temporal de -110 (ver
-        # control_node.py); el resto coincide con el limite real del URDF.
-        self.declare_parameter('joint_limits_lower_deg', [-15.0, -90.0, -90.0])
-        self.declare_parameter('joint_limits_upper_deg', [90.0, 90.0, 90.0])
-        # Debe coincidir con home_angle[] en firmware/esp32_servos/src/main.cpp.
-        # slider = 0 -> el servo queda exactamente en este angulo fisico.
-        self.declare_parameter('home_angle_deg', [180.0, 135.0, 135.0])
-        self.n = self.get_parameter('num_joints').value
-        self.lower_deg = self.get_parameter('joint_limits_lower_deg').value
-        self.upper_deg = self.get_parameter('joint_limits_upper_deg').value
-        self.home_angle_deg = self.get_parameter('home_angle_deg').value
-        self.declare_parameter('dh_link_lengths', [1.0] * 5)
-        self.dh_link_lengths = self.get_parameter('dh_link_lengths').value
 
-        self.cmd_pub = self.create_publisher(RobotCommand, '/robot/command', 10)
+
+        # ----------------------------------------------------
+        # PARÁMETROS ROS 2
+        # ----------------------------------------------------
+
+        self.declare_parameter(
+            'leg_side',
+            'right'
+        )
+
+        self.declare_parameter(
+            'num_joints',
+            3
+        )
+
+        self.leg_side = (
+            self.get_parameter('leg_side')
+            .get_parameter_value()
+            .string_value
+            .lower()
+        )
+
+        self.num_joints = (
+            self.get_parameter('num_joints')
+            .get_parameter_value()
+            .integer_value
+        )
+
+
+        # ----------------------------------------------------
+        # VALIDACIÓN DE LA PIERNA
+        # ----------------------------------------------------
+
+        if self.leg_side not in ['right', 'left']:
+
+            self.get_logger().warn(
+                f"leg_side='{self.leg_side}' no válido. "
+                f"Se utilizará 'right'."
+            )
+
+            self.leg_side = 'right'
+
+
+        # Nombre utilizado visualmente en la interfaz.
+
+        if self.leg_side == 'right':
+            self.leg_name = 'DERECHA'
+        else:
+            self.leg_name = 'IZQUIERDA'
+
+
+        # ====================================================
+        # CONFIGURACIÓN DE ARTICULACIONES
+        # ====================================================
+
+        self.joint_names = [
+            'Hip Roll',
+            'Hip Pitch',
+            'Knee Pitch'
+        ]
+
+
+        # ----------------------------------------------------
+        # LÍMITES VISUALES / DE ENTRADA
+        # ----------------------------------------------------
+
+        self.lower_deg = [
+            -15.0,    # Hip Roll
+            -90.0,    # Hip Pitch
+            -90.0     # Knee Pitch
+        ]
+
+        self.upper_deg = [
+            90.0,     # Hip Roll
+            90.0,     # Hip Pitch
+            90.0      # Knee Pitch
+        ]
+
+
+        # ----------------------------------------------------
+        # OFFSETS DE LOS SERVOS
+        # ----------------------------------------------------
+
+        self.servo_offset_deg = [
+            180.0,    # Hip Roll
+            135.0,    # Hip Pitch
+            135.0     # Knee
+        ]
+
+
+        # ====================================================
+        # VALORES ACTUALES Y OBJETIVO
+        # ====================================================
+
+        self.target_deg = [
+            0.0,
+            0.0,
+            0.0
+        ]
+
+        self.current_deg = [
+            0.0,
+            0.0,
+            0.0
+        ]
+
+
+        # ====================================================
+        # VARIABLES DE CINEMÁTICA
+        # ====================================================
+
+        self.transforms = []
+
+        # MTH seleccionada actualmente.
+
+        self.selected_mth = 'T04'
+
+
+        # ====================================================
+        # PUBLICADORES ROS 2
+        # ====================================================
+
+        # Publicador principal de comandos del robot.
+
+        self.command_pub = self.create_publisher(
+            RobotCommand,
+            '/robot/command',
+            10
+        )
+
+
+        # Publicador utilizado para enviar los ángulos
+        # a los servos en grados.
+
         self.servo_pub = self.create_publisher(
-            Float32MultiArray, '/servo_commands', 10)
-        self.create_subscription(JointState, '/robot/joint_states', self.on_state, 10)
+            Float32MultiArray,
+            '/servo_commands',
+            10
+        )
 
-        self.dragging = False
-        self.updating_sliders = False
-        self.target_deg = [0.0] * self.n   # consigna en grados del operador
-        self.latest_state_deg = [0.0] * self.n  # estado real (no se usa para sliders)
+
+        # ====================================================
+        # SUSCRIPTOR DE ESTADO
+        # ====================================================
+
+        self.state_sub = self.create_subscription(
+            JointState,
+            '/robot/joint_states',
+            self.on_state,
+            10
+        )
+
+
+        # ====================================================
+        # CREACIÓN DE LA INTERFAZ
+        # ====================================================
+
         self.root = tk.Tk()
-        self.root.title('Teleop pata bipedo (sliders en grados)')
+
+        self.root.title(
+            f"Teleop pata bípedo - Pierna {self.leg_name}"
+        )
+
+
+        # ----------------------------------------------------
+        # Tamaño inicial de la ventana
+        # ----------------------------------------------------
+
+        self.root.geometry("650x700")
+
+        self.root.resizable(
+            False,
+            False
+        )
+
+
+        # ====================================================
+        # ESTILO DE TKINTER
+        # ====================================================
+
+        style = ttk.Style()
+
+        try:
+            style.theme_use('clam')
+        except tk.TclError:
+            pass
+
+
+        style.configure(
+            'Title.TLabel',
+            font=('Arial', 18, 'bold')
+        )
+
+        style.configure(
+            'Subtitle.TLabel',
+            font=('Arial', 11)
+        )
+
+        style.configure(
+            'Section.TLabelframe.Label',
+            font=('Arial', 11, 'bold')
+        )
+
+
+        # ====================================================
+        # CONTENEDOR PRINCIPAL
+        # ====================================================
+
+        main_frame = ttk.Frame(
+            self.root,
+            padding=8
+        )
+
+        main_frame.pack(
+            fill='both',
+            expand=True
+        )
+
+
+        # ====================================================
+        # TÍTULO
+        # ====================================================
+
+        title_label = ttk.Label(
+            main_frame,
+            text=f"TELEOPERACIÓN PIERNA {self.leg_name}",
+            style='Title.TLabel'
+        )
+
+        title_label.pack(
+            pady=(0, 2)
+        )
+
+
+        subtitle_label = ttk.Label(
+            main_frame,
+            text="Control de articulaciones y cinemática directa",
+            style='Subtitle.TLabel'
+        )
+
+        subtitle_label.pack(
+            pady=(0, 8)
+        )
+
+
+        # ====================================================
+        # SECCIÓN DE ARTICULACIONES
+        # ====================================================
+
+        joints_frame = ttk.LabelFrame(
+            main_frame,
+            text=f"Articulaciones - Pierna {self.leg_name}",
+            padding=8,
+            style='Section.TLabelframe'
+        )
+
+        joints_frame.pack(
+            fill='x',
+            pady=(0, 8)
+        )
+
+
+        # Listas donde almacenaremos los elementos gráficos.
+
         self.sliders = []
-        self.value_labels = []
-        for i in range(self.n):
-            tk.Label(self.root, text=f'junta {i}').grid(row=i, column=0)
-            s = tk.Scale(self.root, from_=self.lower_deg[i], to=self.upper_deg[i],
-                         resolution=0.5, orient=tk.HORIZONTAL, length=320,
-                         command=lambda v, idx=i: self.on_slide(idx, v))
-            s.bind('<ButtonPress-1>', lambda e, idx=i: self.set_drag(True, idx))
-            s.bind('<ButtonRelease-1>', lambda e, idx=i: self.set_drag(False, idx))
-            s.grid(row=i, column=1)
-            self.sliders.append(s)
-            lbl = tk.Label(self.root, text='0.0°')
-            lbl.grid(row=i, column=2)
-            self.value_labels.append(lbl)
+        self.slider_labels = []
 
-        input_frame = tk.LabelFrame(
-            self.root,
-            text='Ingresar angulos manualmente (grados)',
-            padx=10,
-            pady=8,
+
+        # ----------------------------------------------------
+        # CREACIÓN DE LOS 3 SLIDERS
+        # ----------------------------------------------------
+
+        for i in range(self.num_joints):
+
+            name_label = ttk.Label(
+                joints_frame,
+                text=self.joint_names[i],
+                width=12
+            )
+
+            name_label.grid(
+                row=i,
+                column=0,
+                padx=(8, 5),
+                pady=5,
+                sticky='w'
+            )
+
+
+            # ------------------------------------------------
+            # SLIDER
+            # ------------------------------------------------
+
+            slider = tk.Scale(
+                joints_frame,
+                from_=self.lower_deg[i],
+                to=self.upper_deg[i],
+                orient='horizontal',
+                resolution=0.1,
+                showvalue=False,
+                length=350,
+                command=lambda value, index=i:
+                    self.on_slider_change(
+                        index,
+                        value
+                    )
+            )
+
+            slider.set(
+                self.target_deg[i]
+            )
+
+            slider.grid(
+                row=i,
+                column=1,
+                padx=5,
+                pady=2
+            )
+
+
+            self.sliders.append(
+                slider
+            )
+
+
+            # ------------------------------------------------
+            # ETIQUETA DEL VALOR DEL SLIDER
+            # ------------------------------------------------
+
+            value_label = ttk.Label(
+                joints_frame,
+                text=f"{self.target_deg[i]:.1f}°",
+                width=7
+            )
+
+            value_label.grid(
+                row=i,
+                column=2,
+                padx=(5, 8),
+                pady=5
+            )
+
+
+            self.slider_labels.append(
+                value_label
+            )
+
+
+        # ====================================================
+        # INGRESO MANUAL
+        # ====================================================
+
+        manual_frame = ttk.LabelFrame(
+            main_frame,
+            text="Ingresar ángulos manualmente (grados)",
+            padding=8,
+            style='Section.TLabelframe'
         )
-        input_frame.grid(row=self.n, column=0, columnspan=3,
-                         padx=10, pady=(10, 0), sticky='ew')
-        self.angle_vars = []
-        self.angle_entries = []
-        for i in range(self.n):
-            tk.Label(input_frame, text=f'Junta {i}:').grid(
-                row=0, column=i * 2, padx=(4, 2), pady=2)
-            angle_var = tk.StringVar(value='0.0')
-            entry = tk.Entry(input_frame, textvariable=angle_var, width=9,
-                             justify='right')
-            entry.grid(row=0, column=i * 2 + 1, padx=(0, 8), pady=2)
-            entry.bind('<Return>', lambda event: self.apply_entry_angles())
-            self.angle_vars.append(angle_var)
-            self.angle_entries.append(entry)
 
-        tk.Button(input_frame, text='Aplicar angulos',
-                  command=self.apply_entry_angles).grid(
-                      row=0, column=self.n * 2, padx=(8, 4), pady=2)
-        self.input_status = tk.Label(input_frame, text='', anchor='w')
-        self.input_status.grid(row=1, column=0, columnspan=self.n * 2 + 1,
-                               sticky='w', padx=4, pady=(4, 0))
-
-        matrix_frame = tk.LabelFrame(
-            self.root,
-            text='Matriz resultante de cinematica directa (0A4)',
-            padx=10,
-            pady=8,
+        manual_frame.pack(
+            fill='x',
+            pady=(0, 8)
         )
-        matrix_frame.grid(row=self.n + 1, column=0, columnspan=3,
-                          padx=10, pady=12, sticky='ew')
+
+
+        # ----------------------------------------------------
+        # CAMPOS DE ENTRADA
+        # ----------------------------------------------------
+
+        self.entries = []
+
+        for i in range(self.num_joints):
+
+            label = ttk.Label(
+                manual_frame,
+                text=self.joint_names[i]
+            )
+
+            label.grid(
+                row=0,
+                column=i * 2,
+                padx=(5, 3),
+                pady=3
+            )
+
+
+            entry = tk.Entry(
+                manual_frame,
+                width=8,
+                justify='center'
+            )
+
+            entry.insert(
+                0,
+                f"{self.target_deg[i]:.1f}"
+            )
+
+            entry.grid(
+                row=0,
+                column=i * 2 + 1,
+                padx=(0, 8),
+                pady=3
+            )
+
+
+            self.entries.append(
+                entry
+            )
+
+
+        # ====================================================
+        # BOTÓN APLICAR
+        # ====================================================
+
+        apply_button = ttk.Button(
+            manual_frame,
+            text="Aplicar ángulos",
+            command=self.apply_entry_angles
+        )
+
+        apply_button.grid(
+            row=1,
+            column=0,
+            columnspan=6,
+            pady=(8, 4)
+        )
+
+
+        # ====================================================
+        # MENSAJE DE ESTADO
+        # ====================================================
+
+        self.status_label = tk.Label(
+            manual_frame,
+            text="",
+            font=('Arial', 10, 'bold'),
+            anchor='center'
+        )
+
+        self.status_label.grid(
+            row=2,
+            column=0,
+            columnspan=6,
+            pady=(2, 0)
+        )
+
+
+        # ====================================================
+        # CINEMÁTICA DIRECTA
+        # ====================================================
+
+        kinematics_frame = ttk.LabelFrame(
+            main_frame,
+            text="Cinemática directa",
+            padding=8,
+            style='Section.TLabelframe'
+        )
+
+        kinematics_frame.pack(
+            fill='x',
+            pady=(0, 0)
+        )
+
+
+        # ====================================================
+        # SELECTOR DE MTH
+        # ====================================================
+
+        mth_label = ttk.Label(
+            kinematics_frame,
+            text="Seleccionar MTH:"
+        )
+
+        mth_label.grid(
+            row=0,
+            column=0,
+            padx=(5, 5),
+            pady=3,
+            sticky='w'
+        )
+
+
+        self.mth_selector = ttk.Combobox(
+            kinematics_frame,
+            values=[
+                'T01',
+                'T02',
+                'T03',
+                'T04'
+            ],
+            state='readonly',
+            width=10
+        )
+
+        self.mth_selector.set(
+            self.selected_mth
+        )
+
+        self.mth_selector.grid(
+            row=0,
+            column=1,
+            padx=5,
+            pady=3,
+            sticky='w'
+        )
+
+
+        # Cada vez que cambia la MTH seleccionada,
+        # actualizamos la matriz y la posición.
+
+        self.mth_selector.bind(
+            '<<ComboboxSelected>>',
+            self.on_mth_selected
+        )
+
+
+        # ====================================================
+        # MATRIZ HOMOGÉNEA
+        # ====================================================
+
+        matrix_frame = ttk.Frame(
+            kinematics_frame
+        )
+
+        matrix_frame.grid(
+            row=1,
+            column=0,
+            columnspan=2,
+            pady=(8, 5)
+        )
+
+
         self.matrix_labels = []
+
+
+        # ----------------------------------------------------
+        # Creamos una matriz visual de 4x4.
+        # ----------------------------------------------------
+
         for row in range(4):
-            label_row = []
-            for column in range(4):
-                label = tk.Label(matrix_frame, width=12, anchor='e',
-                                 font=('TkFixedFont', 10), relief='sunken',
-                                 padx=4, pady=3)
-                label.grid(row=row, column=column, padx=2, pady=2)
-                label_row.append(label)
-            self.matrix_labels.append(label_row)
 
-        tk.Label(
-            self.root,
-            text='Rotacion: columnas 1-3 | Posicion: ultima columna',
-            fg='gray35',
-        ).grid(row=self.n + 2, column=0, columnspan=3, pady=(0, 8))
+            matrix_row = []
 
-        self.update_kinematics_matrix()
+            for col in range(4):
 
-        self.root.after(50, self.refresh)
+                label = tk.Label(
+                    matrix_frame,
+                    text="0.0000",
+                    width=12,
+                    relief='ridge',
+                    borderwidth=1,
+                    anchor='center'
+                )
 
-    def set_drag(self, val, idx):
-        self.dragging = val
+                label.grid(
+                    row=row,
+                    column=col,
+                    padx=1,
+                    pady=1
+                )
 
-    def on_slide(self, idx, value):
-        if self.updating_sliders:
+                matrix_row.append(
+                    label
+                )
+
+            self.matrix_labels.append(
+                matrix_row
+            )
+
+
+        # ====================================================
+        # POSICIÓN
+        # ====================================================
+
+        position_frame = ttk.LabelFrame(
+            kinematics_frame,
+            text="Posición",
+            padding=8,
+            style='Section.TLabelframe'
+        )
+
+        position_frame.grid(
+            row=2,
+            column=0,
+            columnspan=2,
+            sticky='ew',
+            pady=(8, 0)
+        )
+
+
+        # ----------------------------------------------------
+        # Etiquetas X, Y y Z
+        # ----------------------------------------------------
+
+        self.position_labels = {}
+
+
+        self.position_labels['x'] = ttk.Label(
+            position_frame,
+            text="x = 0.0000 m"
+        )
+
+        self.position_labels['x'].grid(
+            row=0,
+            column=0,
+            padx=(20, 30),
+            pady=2
+        )
+
+
+        self.position_labels['y'] = ttk.Label(
+            position_frame,
+            text="y = 0.0000 m"
+        )
+
+        self.position_labels['y'].grid(
+            row=0,
+            column=1,
+            padx=30,
+            pady=2
+        )
+
+
+        self.position_labels['z'] = ttk.Label(
+            position_frame,
+            text="z = 0.0000 m"
+        )
+
+        self.position_labels['z'].grid(
+            row=0,
+            column=2,
+            padx=(30, 20),
+            pady=2
+        )
+
+
+        # ====================================================
+        # ACTUALIZACIÓN INICIAL DE CINEMÁTICA
+        # ====================================================
+
+        self.update_kinematics()
+
+
+        # ====================================================
+        # ACTUALIZACIÓN PERIÓDICA DE LA GUI
+        # ====================================================
+
+        self.root.after(
+            50,
+            self.refresh
+        )
+
+
+        # ====================================================
+        # CIERRE DE LA VENTANA
+        # ====================================================
+
+        self.root.protocol(
+            "WM_DELETE_WINDOW",
+            self.on_close
+        )
+
+
+    # ========================================================
+    # SLIDER
+    # ========================================================
+
+    def on_slider_change(
+        self,
+        index,
+        value
+    ):
+
+        try:
+            value = float(value)
+
+        except ValueError:
             return
-        self.dragging = True
-        self.target_deg = [float(sl.get()) for sl in self.sliders]
-        for i, deg in enumerate(self.target_deg):
-            self.value_labels[i]['text'] = f'{deg:.1f}°'
-            self.angle_vars[i].set(f'{deg:.1f}')
+
+
+        # Guardamos el nuevo valor.
+
+        self.target_deg[index] = value
+
+
+        # Actualizamos el texto del slider.
+
+        self.slider_labels[index].config(
+            text=f"{value:.1f}°"
+        )
+
+
+        # Actualizamos el campo de entrada manual.
+
+        self.entries[index].delete(
+            0,
+            tk.END
+        )
+
+        self.entries[index].insert(
+            0,
+            f"{value:.1f}"
+        )
+
+
+        # Publicamos el comando.
+
         self.publish_target()
-        self.update_kinematics_matrix()
-        # Pequeño delay antes de permitir que refresh mueva los sliders
-        self.root.after(100, lambda: setattr(self, 'dragging', False))
 
-    def on_state(self, msg):
-        # Solo guardamos el estado real para depuración; NO tocamos sliders.
-        self.latest_state_deg = [math.degrees(p) for p in msg.position[:self.n]]
 
-    def refresh(self):
-        # Los sliders se quedan en la consigna del operador.
-        self.updating_sliders = True
-        for i in range(self.n):
-            val = max(self.lower_deg[i],
-                      min(self.upper_deg[i], self.target_deg[i]))
-            self.sliders[i].set(val)
-            self.value_labels[i]['text'] = f'{val:.1f}°'
-        self.updating_sliders = False
-        self.root.after(50, self.refresh)
+        # Recalculamos la cinemática.
+
+        self.update_kinematics()
+
+
+    # ========================================================
+    # APLICAR ÁNGULOS MANUALES
+    # ========================================================
 
     def apply_entry_angles(self):
-        """Valida y aplica simultaneamente los angulos escritos."""
+
+        # ----------------------------------------------------
+        # 1. Intentamos convertir todos los campos a float.
+        # ----------------------------------------------------
+
         try:
-            values = [float(angle_var.get()) for angle_var in self.angle_vars]
+
+            values = [
+                float(
+                    self.entries[i].get()
+                )
+                for i in range(
+                    self.num_joints
+                )
+            ]
+
         except ValueError:
-            self.show_input_error('Escribe un numero valido en cada campo.')
+
+            self.set_status(
+                "Error: todos los ángulos deben ser valores numéricos.",
+                "red"
+            )
+
             return
 
+
+        # ----------------------------------------------------
+        # 2. VALIDAMOS LOS LÍMITES
+        # ----------------------------------------------------
+
         for i, value in enumerate(values):
-            if not math.isfinite(value):
-                self.show_input_error(f'Junta {i}: el valor debe ser finito.')
-                return
-            if not self.lower_deg[i] <= value <= self.upper_deg[i]:
-                self.show_input_error(
-                    f'Junta {i}: usa un valor entre {self.lower_deg[i]:g}° '
-                    f'y {self.upper_deg[i]:g}°.')
+
+            if (
+                value < self.lower_deg[i]
+                or
+                value > self.upper_deg[i]
+            ):
+
+                self.set_status(
+                    f"{self.joint_names[i]} debe estar entre "
+                    f"{self.lower_deg[i]:.1f}° y "
+                    f"{self.upper_deg[i]:.1f}°.",
+                    "red"
+                )
+
                 return
 
-        self.target_deg = values
-        self.updating_sliders = True
+
+        # ----------------------------------------------------
+        # 3. TODOS LOS VALORES SON VÁLIDOS
+        # ----------------------------------------------------
+
+        self.target_deg = values.copy()
+
+
+        # ----------------------------------------------------
+        # Actualizamos sliders y etiquetas.
+        # ----------------------------------------------------
+
         for i, value in enumerate(values):
-            self.sliders[i].set(value)
-            self.value_labels[i]['text'] = f'{value:.1f}°'
-            self.angle_vars[i].set(f'{value:.1f}')
-        self.updating_sliders = False
+
+            self.sliders[i].set(
+                value
+            )
+
+            self.slider_labels[i].config(
+                text=f"{value:.1f}°"
+            )
+
+
+        # ----------------------------------------------------
+        # 4. Publicamos el nuevo comando.
+        # ----------------------------------------------------
+
         self.publish_target()
-        self.update_kinematics_matrix()
-        self.input_status.configure(text='Angulos aplicados.', fg='dark green')
 
-    def show_input_error(self, message):
-        """Muestra un error de validacion sin enviar comandos al robot."""
-        self.input_status.configure(text=message, fg='firebrick')
 
-    def _map_to_servo_deg(self, joint_deg):
-        """Convierte el grado del slider (offset respecto al home) en el
-        angulo fisico absoluto del servo: slider 0 == home_angle_deg[i].
-        Debe reflejar el rango real del servo (0-270 grados fisicos, ver
-        SERVO_ANG_MIN/MAX en firmware/esp32_servos/src/main.cpp)."""
-        servo_deg = []
-        for i in range(self.n):
-            physical = self.home_angle_deg[i] + joint_deg[i]
-            physical = max(0.0, min(270.0, physical))
-            servo_deg.append(round(physical, 1))
-        return servo_deg
+        # ----------------------------------------------------
+        # 5. Recalculamos la cinemática.
+        # ----------------------------------------------------
+
+        self.update_kinematics()
+
+
+        # ----------------------------------------------------
+        # 6. Mensaje de éxito.
+        # ----------------------------------------------------
+
+        self.set_status(
+            "✓ Ángulos aplicados correctamente.",
+            "green"
+        )
+
+
+    # ========================================================
+    # MENSAJE DE ESTADO
+    # ========================================================
+
+    def set_status(
+        self,
+        message,
+        color
+    ):
+
+        self.status_label.config(
+            text=message,
+            foreground=color
+        )
+
+
+    # ========================================================
+    # PUBLICAR COMANDO
+    # ========================================================
 
     def publish_target(self):
-        """Publica la consigna angular actual en radianes (robot) y grados (servos)."""
-        msg = RobotCommand()
-        msg.mode = 1
-        msg.position = [math.radians(value) for value in self.target_deg]
-        msg.velocity = [0.0] * self.n
-        self.cmd_pub.publish(msg)
 
-        # Publicar tambien a los servos de la ESP32 (grados fisicos 0-270,
-        # offset respecto a home_angle_deg)
+        # ----------------------------------------------------
+        # Conversión grados -> radianes
+        # ----------------------------------------------------
+
+        angles_rad = [
+            math.radians(angle)
+            for angle in self.target_deg
+        ]
+
+
+        # ----------------------------------------------------
+        # Mensaje RobotCommand
+        # ----------------------------------------------------
+
+        command_msg = RobotCommand()
+
+        command_msg.position = angles_rad
+
+        self.command_pub.publish(
+            command_msg
+        )
+
+
+        # ----------------------------------------------------
+        # Mensaje para los servos
+        # ----------------------------------------------------
+
         servo_msg = Float32MultiArray()
-        servo_msg.data = self._map_to_servo_deg(self.target_deg)
-        self.servo_pub.publish(servo_msg)
 
-    def update_kinematics_matrix(self):
-        """Recalcula y muestra 0A4 usando la posicion de los sliders."""
-        if self.n != 3:
+        servo_msg.data = [
+            float(
+                self.target_deg[i]
+                + self.servo_offset_deg[i]
+            )
+            for i in range(
+                self.num_joints
+            )
+        ]
+
+        self.servo_pub.publish(
+            servo_msg
+        )
+
+
+    # ========================================================
+    # CINEMÁTICA DIRECTA
+    # ========================================================
+
+    def update_kinematics(self):
+
+        q = self.target_deg.copy()
+
+
+        # ----------------------------------------------------
+        # Selección de la cadena cinemática
+        # ----------------------------------------------------
+
+        if self.leg_side == 'right':
+
+            self.transforms = (
+                forward_kinematics_right(q)
+            )
+
+        else:
+
+            self.transforms = (
+                forward_kinematics_left(q)
+            )
+
+
+        # ----------------------------------------------------
+        # Actualizamos la representación gráfica.
+        # ----------------------------------------------------
+
+        self.update_kinematics_display()
+
+
+    # ========================================================
+    # ACTUALIZACIÓN DE MATRIZ Y POSICIÓN
+    # ========================================================
+
+    def update_kinematics_display(self):
+
+        # ----------------------------------------------------
+        # Si todavía no hay matrices calculadas, no hacemos
+        # nada.
+        # ----------------------------------------------------
+
+        if not self.transforms:
             return
-        matrix = end_effector_matrix(self.target_deg, self.dh_link_lengths)
+
+
+        # ----------------------------------------------------
+        # Determinamos qué índice corresponde a la MTH.
+        #
+        # T01 -> índice 0
+        # T02 -> índice 1
+        # T03 -> índice 2
+        # T04 -> índice 3
+        # ----------------------------------------------------
+
+        mth_index = int(
+            self.selected_mth[-1]
+        ) - 1
+
+
+        # Verificación para evitar acceder a una posición
+        # inexistente.
+
+        if (
+            mth_index < 0
+            or
+            mth_index >= len(self.transforms)
+        ):
+            return
+
+
+        T = self.transforms[mth_index]
+
+
+        # ====================================================
+        # ACTUALIZAR MATRIZ
+        # ====================================================
+
         for row in range(4):
-            for column in range(4):
-                value = matrix[row][column]
-                if abs(value) < 0.00005:
-                    value = 0.0
-                self.matrix_labels[row][column]['text'] = f'{value: .4f}'
 
-    def spin_ros(self):
-        rclpy.spin(self)
+            for col in range(4):
 
+                value = T[row, col]
+
+                self.matrix_labels[row][col].config(
+                    text=f"{value:.4f}"
+                )
+
+
+        # ====================================================
+        # EXTRAER POSICIÓN
+        # ====================================================
+
+        position = get_position(T)
+
+        x = position[0]
+        y = position[1]
+        z = position[2]
+
+
+        self.position_labels['x'].config(
+            text=f"x = {x:.4f} m"
+        )
+
+        self.position_labels['y'].config(
+            text=f"y = {y:.4f} m"
+        )
+
+        self.position_labels['z'].config(
+            text=f"z = {z:.4f} m"
+        )
+
+
+    # ========================================================
+    # CAMBIO DE MTH
+    # ========================================================
+
+    def on_mth_selected(
+        self,
+        event=None
+    ):
+
+        self.selected_mth = (
+            self.mth_selector.get()
+        )
+
+        self.update_kinematics_display()
+
+
+    # ========================================================
+    # RECIBIR ESTADO DE ARTICULACIONES
+    # ========================================================
+
+    def on_state(
+        self,
+        msg
+    ):
+
+        try:
+
+            positions = msg.position
+
+            for i in range(
+                min(
+                    self.num_joints,
+                    len(positions)
+                )
+            ):
+
+                self.current_deg[i] = (
+                    math.degrees(
+                        positions[i]
+                    )
+                )
+
+        except Exception as e:
+
+            self.get_logger().error(
+                f"Error procesando JointState: {e}"
+            )
+
+
+    # ========================================================
+    # ACTUALIZACIÓN PERIÓDICA DE LA GUI
+    # ========================================================
+
+    def refresh(self):
+
+        # ----------------------------------------------------
+        # Aquí podemos reflejar información recibida desde
+        # ROS si posteriormente queremos mostrarla.
+        # ----------------------------------------------------
+
+        self.root.after(
+            50,
+            self.refresh
+        )
+
+
+    # ========================================================
+    # CIERRE
+    # ========================================================
+
+    def on_close(self):
+
+        try:
+
+            self.destroy_node()
+
+        except Exception:
+            pass
+
+
+        try:
+
+            if rclpy.ok():
+                rclpy.shutdown()
+
+        except Exception:
+            pass
+
+
+        self.root.destroy()
+
+
+# ============================================================
+# FUNCIÓN PRINCIPAL
+# ============================================================
 
 def main(args=None):
-    rclpy.init(args=args)
-    node = GuiNode()
-    # rclpy en hilo aparte para no bloquear la GUI
-    t = threading.Thread(target=node.spin_ros, daemon=True)
-    t.start()
-    try:
-        node.root.mainloop()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        node.destroy_node()
-        rclpy.shutdown()
 
+    # --------------------------------------------------------
+    # Inicializamos ROS 2
+    # --------------------------------------------------------
+
+    rclpy.init(
+        args=args
+    )
+
+
+    # --------------------------------------------------------
+    # Creamos el nodo
+    # --------------------------------------------------------
+
+    node = TeleopNode()
+
+
+    # --------------------------------------------------------
+    # ROS 2 se ejecuta en un hilo separado.
+    # --------------------------------------------------------
+
+    ros_thread = threading.Thread(
+        target=rclpy.spin,
+        args=(node,),
+        daemon=True
+    )
+
+    ros_thread.start()
+
+
+    # --------------------------------------------------------
+    # Ejecutamos la interfaz gráfica.
+    # --------------------------------------------------------
+
+    try:
+
+        node.root.mainloop()
+
+    except KeyboardInterrupt:
+
+        pass
+
+    finally:
+
+        # ----------------------------------------------------
+        # Si la interfaz todavía está abierta, cerramos
+        # correctamente ROS.
+        # ----------------------------------------------------
+
+        if rclpy.ok():
+
+            try:
+                rclpy.shutdown()
+
+            except Exception:
+                pass
+
+
+        try:
+            node.destroy_node()
+
+        except Exception:
+            pass
+
+
+# ============================================================
+# EJECUCIÓN DIRECTA
+# ============================================================
 
 if __name__ == '__main__':
     main()
