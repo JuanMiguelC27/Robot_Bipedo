@@ -1,106 +1,257 @@
 """
-Cinemática directa 
-Implementación manual con Denavit-Hartenberg.
+Cinemática directa de una pierna del robot bípedo.
+
+Implementación manual mediante Denavit-Hartenberg.
+
+Convención:
+    q[0] -> Hip Roll
+    q[1] -> Hip Pitch
+    q[2] -> Knee Pitch
+
+Las funciones de cinemática reciben los ángulos en grados
+y retornan las matrices homogéneas T01, T02, T03 y T04.
 """
 
 import numpy as np
 
-# ----------------------------------------------------------------------
-# Parámetros geométricos (longitudes de eslabones)
-# ----------------------------------------------------------------------
-L1, L2, L3, L4, L5 = 1.0, 1.0, 1.0, 1.0, 1.0
 
-# Ángulos articulares en grados
-q1_deg = 0   
-q2_deg = 0
-q3_deg = 0
+# ======================================================================
+# PARÁMETROS GEOMÉTRICOS
+# ======================================================================
 
-# Límites articulares (en grados)
-q1_min, q1_max = -40, 40
-q2_min, q2_max = -60, 60
-q3_min, q3_max = -70, 70
+L1 = 200.0
+L2 = 85.0
+L3 = 120.0
+L4 = 235.0
+L5 = 250.0
 
-# ----------------------------------------------------------------------
-# Función para limitar un valor entre mn y mx
-# ----------------------------------------------------------------------
-def clamp(v, mn, mx):
-    return max(mn, min(v, mx))
+# ======================================================================
+# MATRIZ DH
+# ======================================================================
 
-# Guardar originales para avisar
-q1_orig, q2_orig, q3_orig = q1_deg, q2_deg, q3_deg
-
-# Aplicar límites
-q1_deg = clamp(q1_deg, q1_min, q1_max)
-q2_deg = clamp(q2_deg, q2_min, q2_max)
-q3_deg = clamp(q3_deg, q3_min, q3_max)
-
-# Si el ángulo original estaba fuera de rango esto indica que se ajustó
-if q1_deg != q1_orig:
-    print(f"Advertencia: q1 fuera de rango, ajustado a {q1_deg}°")
-if q2_deg != q2_orig:
-    print(f"Advertencia: q2 fuera de rango, ajustado a {q2_deg}°")
-if q3_deg != q3_orig:
-    print(f"Advertencia: q3 fuera de rango, ajustado a {q3_deg}°")
-
-# Conversión a radianes
-q1 = np.radians(q1_deg)
-q2 = np.radians(q2_deg)
-q3 = np.radians(q3_deg)
-
-# ----------------------------------------------------------------------
-# Función que construye la matriz DH individual
-# ----------------------------------------------------------------------
 def dh_matrix(theta, d, a, alpha):
     """
-    Calcula la matriz de transformación homogénea 4x4
-    según los parámetros de Denavit-Hartenberg.
+    Calcula una matriz homogénea 4x4 utilizando
+    la convención DH estándar.
     """
+
     ct = np.cos(theta)
     st = np.sin(theta)
+
     ca = np.cos(alpha)
     sa = np.sin(alpha)
 
     return np.array([
-        [ct, -st*ca,  st*sa, a*ct],
-        [st,  ct*ca, -ct*sa, a*st],
-        [0,   sa,     ca,    d   ],
-        [0,   0,      0,     1   ]
+        [ct, -st * ca,  st * sa, a * ct],
+        [st,  ct * ca, -ct * sa, a * st],
+        [0.0, sa,       ca,      d],
+        [0.0, 0.0,      0.0,     1.0]
     ])
 
-# ----------------------------------------------------------------------
-# Matrices individuales según la tabla DH
-# ----------------------------------------------------------------------
-# Articulación 1 (fija, theta=0)
-A01 = dh_matrix(0, d=L1, a=L2, alpha=np.pi/2)
 
-# Articulación 2 (variable q1)
-A12 = dh_matrix(q1, d=0, a=L3, alpha=-np.pi/2)
+# ======================================================================
+# CINEMÁTICA DIRECTA - PIERNA DERECHA
+# ======================================================================
 
-# Articulación 3 (variable q2)
-A23 = dh_matrix(q2, d=0, a=L4, alpha=np.pi)
+def forward_kinematics_right(q):
+    """
+    Calcula la cinemática directa de la pierna derecha.
 
-# Articulación 4 (variable q3)
-A34 = dh_matrix(q3, d=0, a=L5, alpha=0)
+    Parámetros
+    ----------
+    q : list o array
+        [Hip Roll, Hip Pitch, Knee Pitch] en grados.
 
-# ----------------------------------------------------------------------
-# Matrices acumuladas (cinemática directa)
-# ----------------------------------------------------------------------
-A02 = A01 @ A12
-A03 = A02 @ A23
-A04 = A03 @ A34
+    Retorna
+    -------
+    T01, T02, T03, T04 : np.ndarray
+        Matrices homogéneas 4x4.
+    """
 
-# ----------------------------------------------------------------------
-# Mostrar resultados
-# ----------------------------------------------------------------------
+    # --------------------------------------------------------------
+    # Conversión a radianes
+    # --------------------------------------------------------------
+
+    q1 = np.radians(q[0])
+    q2 = np.radians(q[1])
+    q3 = np.radians(q[2])
+
+    # --------------------------------------------------------------
+    # Matrices DH
+    # --------------------------------------------------------------
+
+    # Articulación 1 - Hip Roll
+    A01 = dh_matrix(
+        0,
+        d=L1,
+        a=L2,
+        alpha=np.pi / 2
+    )
+
+    # Articulación 2 - Hip Pitch
+    A12 = dh_matrix(
+        q1,
+        d=0,
+        a=L3,
+        alpha=-np.pi / 2
+    )
+
+    # Articulación 3 - Knee Pitch
+    A23 = dh_matrix(
+        q2,
+        d=0,
+        a=L4,
+        alpha=np.pi
+    )
+
+    # Articulación 4
+    A34 = dh_matrix(
+        q3,
+        d=0,
+        a=L5,
+        alpha=0
+    )
+
+    # --------------------------------------------------------------
+    # Transformaciones acumuladas
+    # --------------------------------------------------------------
+
+    T01 = A01
+
+    T02 = A01 @ A12
+
+    T03 = T02 @ A23
+
+    T04 = T03 @ A34
+
+    return T01, T02, T03, T04
+
+
+# ======================================================================
+# CINEMÁTICA DIRECTA - PIERNA IZQUIERDA
+# ======================================================================
+
+def forward_kinematics_left(q):
+    """
+    Calcula la cinemática directa de la pierna izquierda.
+
+    IMPORTANTE:
+    Por ahora utiliza la misma cadena DH de la versión original.
+    Si la pierna izquierda tiene una convención DH reflejada,
+    esta función debe modificarse con esa tabla DH específica.
+    """
+
+    # --------------------------------------------------------------
+    # Conversión a radianes
+    # --------------------------------------------------------------
+
+    q1 = np.radians(q[0])
+    q2 = np.radians(q[1])
+    q3 = np.radians(q[2])
+
+    # --------------------------------------------------------------
+    # Matrices DH
+    # --------------------------------------------------------------
+
+    # Articulación 1 - Hip Roll
+    A01 = dh_matrix(
+        0,
+        d=-L1,
+        a=L2,
+        alpha=-np.pi / 2
+    )
+
+    # Articulación 2 - Hip Pitch
+    A12 = dh_matrix(
+        q1,
+        d=0,
+        a=L3,
+        alpha=np.pi / 2
+    )
+
+    # Articulación 3 - Knee Pitch
+    A23 = dh_matrix(
+        q2,
+        d=0,
+        a=L4,
+        alpha=np.pi
+    )
+
+    # Articulación 4
+    A34 = dh_matrix(
+        q3,
+        d=0,
+        a=L5,
+        alpha=0
+    )
+
+    # --------------------------------------------------------------
+    # Transformaciones acumuladas
+    # --------------------------------------------------------------
+
+    T01 = A01
+
+    T02 = A01 @ A12
+
+    T03 = T02 @ A23
+
+    T04 = T03 @ A34
+
+    return T01, T02, T03, T04
+
+
+# ======================================================================
+# OBTENER POSICIÓN XYZ
+# ======================================================================
+
+def get_position(T):
+    """
+    Extrae la posición [x, y, z] de una matriz homogénea.
+    """
+
+    return T[0:3, 3]
+
+
+# ======================================================================
+# MOSTRAR MATRIZ
+# ======================================================================
+
 def imprimir_matriz(nombre, M):
+    """
+    Imprime una matriz de forma legible.
+    """
+
     print(f"\n{nombre} =")
     print(np.round(M, 4))
 
-print(f"{'='*50}")
-print(f"q1 = {q1_deg}°  q2 = {q2_deg}°  q3 = {q3_deg}°")
-print(f"{'='*50}")
 
-imprimir_matriz('0A1', A01)
-imprimir_matriz('0A2', A02)
-imprimir_matriz('0A3', A03)
-imprimir_matriz('0A4', A04)
+# ======================================================================
+# PRUEBA DEL MÓDULO
+# ======================================================================
+
+if __name__ == "__main__":
+
+    # Ángulos de prueba
+    q = [0.0, 0.0, 0.0]
+
+    T01, T02, T03, T04 = forward_kinematics_right(q)
+
+    print("=" * 50)
+    print(
+        f"Hip Roll = {q[0]}° | "
+        f"Hip Pitch = {q[1]}° | "
+        f"Knee Pitch = {q[2]}°"
+    )
+    print("=" * 50)
+
+    imprimir_matriz("T01", T01)
+    imprimir_matriz("T02", T02)
+    imprimir_matriz("T03", T03)
+    imprimir_matriz("T04", T04)
+
+    position = get_position(T04)
+
+    print("\nPosición del efector final:")
+    print(f"x = {position[0]:.4f}")
+    print(f"y = {position[1]:.4f}")
+    print(f"z = {position[2]:.4f}")
