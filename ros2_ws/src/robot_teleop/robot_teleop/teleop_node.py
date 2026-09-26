@@ -174,6 +174,23 @@ class TeleopNode(Node):
         ]
 
 
+        # ----------------------------------------------------
+        # ÁNGULO REAL DEL SERVO (feedback desde el ESP32,
+        # tópico /servo_states). Se guarda ya convertido al
+        # mismo sistema de grados que usan los sliders (se le
+        # resta el offset de servo) para poder comparar
+        # "comandado" vs "real" de forma directa.
+        # ----------------------------------------------------
+
+        self.real_deg = [
+            0.0,
+            0.0,
+            0.0
+        ]
+
+        self.has_real_state = False
+
+
         # ====================================================
         # VARIABLES DE CINEMÁTICA
         # ====================================================
@@ -220,6 +237,17 @@ class TeleopNode(Node):
         )
 
 
+        # Estado real de los servos, publicado por el firmware
+        # del ESP32 (ver firmware/esp32_servos/src/main.cpp).
+
+        self.servo_state_sub = self.create_subscription(
+            Float32MultiArray,
+            '/servo_states',
+            self.on_servo_state,
+            10
+        )
+
+
         # ====================================================
         # CREACIÓN DE LA INTERFAZ
         # ====================================================
@@ -235,11 +263,11 @@ class TeleopNode(Node):
         # Tamaño inicial de la ventana
         # ----------------------------------------------------
 
-        self.root.geometry("650x700")
+        self.root.geometry("780x740")
 
         self.root.resizable(
             False,
-            False
+            True
         )
 
 
@@ -333,6 +361,7 @@ class TeleopNode(Node):
 
         self.sliders = []
         self.slider_labels = []
+        self.real_labels = []
 
 
         # ----------------------------------------------------
@@ -412,6 +441,29 @@ class TeleopNode(Node):
 
             self.slider_labels.append(
                 value_label
+            )
+
+
+            # ------------------------------------------------
+            # ETIQUETA DEL ÁNGULO REAL (feedback del servo)
+            # ------------------------------------------------
+
+            real_label = ttk.Label(
+                joints_frame,
+                text="real: sin datos",
+                width=16,
+                foreground='gray'
+            )
+
+            real_label.grid(
+                row=i,
+                column=3,
+                padx=(5, 8),
+                pady=5
+            )
+
+            self.real_labels.append(
+                real_label
             )
 
 
@@ -496,6 +548,25 @@ class TeleopNode(Node):
 
 
         # ====================================================
+        # BOTÓN APLICAR A HARDWARE (ESP32 real)
+        # ====================================================
+
+        hardware_button = tk.Button(
+            manual_frame,
+            text="Aplicar a motores (HARDWARE)",
+            bg='#ffdddd',
+            command=self.apply_to_hardware
+        )
+
+        hardware_button.grid(
+            row=2,
+            column=0,
+            columnspan=6,
+            pady=(4, 4)
+        )
+
+
+        # ====================================================
         # MENSAJE DE ESTADO
         # ====================================================
 
@@ -507,7 +578,7 @@ class TeleopNode(Node):
         )
 
         self.status_label.grid(
-            row=2,
+            row=3,
             column=0,
             columnspan=6,
             pady=(2, 0)
@@ -914,7 +985,11 @@ class TeleopNode(Node):
 
 
         # ----------------------------------------------------
-        # Mensaje RobotCommand
+        # Mensaje RobotCommand (preview, siempre en vivo).
+        #
+        # OJO: esto ya NO toca los motores reales. Solo mueve
+        # el modelo en RViz. Para mandar la orden al hardware
+        # hay que presionar el botón "Aplicar a motores".
         # ----------------------------------------------------
 
         command_msg = RobotCommand()
@@ -926,9 +1001,11 @@ class TeleopNode(Node):
         )
 
 
-        # ----------------------------------------------------
-        # Mensaje para los servos
-        # ----------------------------------------------------
+    # ========================================================
+    # APLICAR A HARDWARE (ESP32 real, vía /servo_commands)
+    # ========================================================
+
+    def apply_to_hardware(self):
 
         servo_msg = Float32MultiArray()
 
@@ -944,6 +1021,11 @@ class TeleopNode(Node):
 
         self.servo_pub.publish(
             servo_msg
+        )
+
+        self.set_status(
+            "✓ Enviado al motor real (última consigna de los sliders).",
+            "green"
         )
 
 
@@ -1112,15 +1194,81 @@ class TeleopNode(Node):
 
 
     # ========================================================
+    # RECIBIR ÁNGULO REAL DEL SERVO (/servo_states, ESP32)
+    # ========================================================
+
+    def on_servo_state(
+        self,
+        msg
+    ):
+
+        try:
+
+            data = msg.data
+
+            n = min(
+                self.num_joints,
+                len(data)
+            )
+
+            for i in range(n):
+
+                # El firmware trabaja en "espacio de servo"
+                # (con el offset ya sumado). Se resta acá para
+                # mostrarlo en el mismo sistema de grados que
+                # usan los sliders (espacio cinemático).
+
+                self.real_deg[i] = (
+                    float(data[i])
+                    - self.servo_offset_deg[i]
+                )
+
+            self.has_real_state = True
+
+        except Exception as e:
+
+            self.get_logger().error(
+                f"Error procesando /servo_states: {e}"
+            )
+
+
+    # ========================================================
     # ACTUALIZACIÓN PERIÓDICA DE LA GUI
     # ========================================================
 
     def refresh(self):
 
         # ----------------------------------------------------
-        # Aquí podemos reflejar información recibida desde
-        # ROS si posteriormente queremos mostrarla.
+        # Reflejamos en la GUI el último ángulo real recibido
+        # del servo (o "sin datos" si todavía no llegó nada).
+        #
+        # Esto se hace acá, en el hilo de Tkinter, y no dentro
+        # de on_servo_state (que corre en el hilo de ROS), para
+        # no tocar widgets desde otro hilo.
         # ----------------------------------------------------
+
+        for i in range(self.num_joints):
+
+            if self.has_real_state:
+
+                diff = abs(
+                    self.real_deg[i]
+                    - self.target_deg[i]
+                )
+
+                color = 'dark green' if diff < 2.0 else 'firebrick'
+
+                self.real_labels[i].config(
+                    text=f"real: {self.real_deg[i]:.1f}°",
+                    foreground=color
+                )
+
+            else:
+
+                self.real_labels[i].config(
+                    text="real: sin datos",
+                    foreground='gray'
+                )
 
         self.root.after(
             50,
