@@ -35,8 +35,11 @@ import threading
 import rclpy
 from rclpy.node import Node
 
-from robot_interfaces.msg import RobotCommand, JointState
+from robot_interfaces.msg import (
+    RobotCommand, JointState, IKResult, IKJacobTarget
+)
 from std_msgs.msg import Float32MultiArray
+from geometry_msgs.msg import Point
 
 import tkinter as tk
 from tkinter import ttk
@@ -51,6 +54,15 @@ from robot_kinematics.kinem_leg_gen import (
     forward_kinematics_left,
     get_position
 )
+
+
+# ------------------------------------------------------------
+# POSICIÓN DE "HOME" PARA LA PESTAÑA DE CINEMÁTICA INVERSA (mm)
+# ------------------------------------------------------------
+
+HOME_X = 709.02
+HOME_Y = 0.0
+HOME_Z = 200.4
 
 
 # ============================================================
@@ -249,6 +261,51 @@ class TeleopNode(Node):
 
 
         # ====================================================
+        # CINEMÁTICA INVERSA (vía ik_node, por tópicos)
+        # ====================================================
+
+        self.ik_target_pub = self.create_publisher(
+            Point,
+            '/robot/ik_target',
+            10
+        )
+
+        self.ik_result_sub = self.create_subscription(
+            IKResult,
+            '/robot/ik_result',
+            self.on_ik_result,
+            10
+        )
+
+        # Resultado pendiente de aplicar en la GUI. Se llena en
+        # on_ik_result (hilo de ROS) y se consume en refresh()
+        # (hilo de Tkinter), igual que current_deg/real_deg.
+
+        self.pending_ik_result = None
+
+
+        # ====================================================
+        # CINEMÁTICA INVERSA - MÉTODO DEL JACOBIANO
+        # (vía ik_jacob_node, por tópicos)
+        # ====================================================
+
+        self.ik_jacob_target_pub = self.create_publisher(
+            IKJacobTarget,
+            '/robot/ik_jacob_target',
+            10
+        )
+
+        self.ik_jacob_result_sub = self.create_subscription(
+            IKResult,
+            '/robot/ik_jacob_result',
+            self.on_ik_jacob_result,
+            10
+        )
+
+        self.pending_ik_jacob_result = None
+
+
+        # ====================================================
         # CREACIÓN DE LA INTERFAZ
         # ====================================================
 
@@ -331,7 +388,7 @@ class TeleopNode(Node):
 
         subtitle_label = ttk.Label(
             main_frame,
-            text="Control de articulaciones y cinemática directa",
+            text="Control de articulaciones, cinemática directa e inversa",
             style='Subtitle.TLabel'
         )
 
@@ -341,11 +398,55 @@ class TeleopNode(Node):
 
 
         # ====================================================
+        # PESTAÑAS: CINEMÁTICA DIRECTA / CINEMÁTICA INVERSA
+        # ====================================================
+
+        notebook = ttk.Notebook(
+            main_frame
+        )
+
+        notebook.pack(
+            fill='both',
+            expand=True
+        )
+
+        tab_fk = ttk.Frame(
+            notebook,
+            padding=0
+        )
+
+        tab_ik = ttk.Frame(
+            notebook,
+            padding=8
+        )
+
+        tab_ik_jacob = ttk.Frame(
+            notebook,
+            padding=8
+        )
+
+        notebook.add(
+            tab_fk,
+            text="Cinemática directa"
+        )
+
+        notebook.add(
+            tab_ik,
+            text="Cinemática inversa"
+        )
+
+        notebook.add(
+            tab_ik_jacob,
+            text="Cinemática inversa (Jacobiano)"
+        )
+
+
+        # ====================================================
         # SECCIÓN DE ARTICULACIONES
         # ====================================================
 
         joints_frame = ttk.LabelFrame(
-            main_frame,
+            tab_fk,
             text=f"Articulaciones - Pierna {self.leg_name}",
             padding=8,
             style='Section.TLabelframe'
@@ -472,7 +573,7 @@ class TeleopNode(Node):
         # ====================================================
 
         manual_frame = ttk.LabelFrame(
-            main_frame,
+            tab_fk,
             text="Ingresar ángulos manualmente (grados)",
             padding=8,
             style='Section.TLabelframe'
@@ -590,7 +691,7 @@ class TeleopNode(Node):
         # ====================================================
 
         kinematics_frame = ttk.LabelFrame(
-            main_frame,
+            tab_fk,
             text="Cinemática directa",
             padding=8,
             style='Section.TLabelframe'
@@ -771,6 +872,302 @@ class TeleopNode(Node):
             column=2,
             padx=(30, 20),
             pady=2
+        )
+
+
+        # ====================================================
+        # PESTAÑA DE CINEMÁTICA INVERSA
+        # ====================================================
+
+        ik_coords_frame = ttk.LabelFrame(
+            tab_ik,
+            text="Coordenada objetivo (mm)",
+            padding=8,
+            style='Section.TLabelframe'
+        )
+
+        ik_coords_frame.pack(
+            fill='x',
+            pady=(0, 8)
+        )
+
+        self.ik_entries = {}
+
+        for i, axis in enumerate(('X', 'Y', 'Z')):
+
+            label = ttk.Label(
+                ik_coords_frame,
+                text=f"{axis}:"
+            )
+
+            label.grid(
+                row=0,
+                column=i * 2,
+                padx=(5, 3),
+                pady=5
+            )
+
+            entry = tk.Entry(
+                ik_coords_frame,
+                width=8,
+                justify='center'
+            )
+
+            entry.insert(
+                0,
+                "0.0"
+            )
+
+            entry.grid(
+                row=0,
+                column=i * 2 + 1,
+                padx=(0, 10),
+                pady=5
+            )
+
+            self.ik_entries[axis] = entry
+
+        ik_send_button = ttk.Button(
+            ik_coords_frame,
+            text="Calcular y enviar",
+            command=self.send_ik_target
+        )
+
+        ik_send_button.grid(
+            row=1,
+            column=0,
+            columnspan=3,
+            pady=(5, 0)
+        )
+
+        ik_home_button = ttk.Button(
+            ik_coords_frame,
+            text="Home",
+            command=self.go_home
+        )
+
+        ik_home_button.grid(
+            row=1,
+            column=3,
+            columnspan=3,
+            pady=(5, 0)
+        )
+
+
+        # ----------------------------------------------------
+        # RESULTADO (q1, q2, q3)
+        # ----------------------------------------------------
+
+        ik_result_frame = ttk.LabelFrame(
+            tab_ik,
+            text="Resultado",
+            padding=8,
+            style='Section.TLabelframe'
+        )
+
+        ik_result_frame.pack(
+            fill='x',
+            pady=(0, 8)
+        )
+
+        self.ik_q_labels = []
+
+        for i, name in enumerate(
+            ('q1 (Hip Roll)', 'q2 (Hip Pitch)', 'q3 (Knee)')
+        ):
+
+            label = ttk.Label(
+                ik_result_frame,
+                text=f"{name}:",
+                width=16
+            )
+
+            label.grid(
+                row=i,
+                column=0,
+                padx=(5, 5),
+                pady=3,
+                sticky='w'
+            )
+
+            value_label = ttk.Label(
+                ik_result_frame,
+                text="--",
+                width=10
+            )
+
+            value_label.grid(
+                row=i,
+                column=1,
+                padx=(0, 5),
+                pady=3,
+                sticky='w'
+            )
+
+            self.ik_q_labels.append(
+                value_label
+            )
+
+
+        # ----------------------------------------------------
+        # MENSAJE DE ESTADO (pestaña IK)
+        # ----------------------------------------------------
+
+        self.ik_status_label = tk.Label(
+            tab_ik,
+            text="Ingrese una coordenada y presione \"Calcular y enviar\".",
+            font=('Arial', 10, 'bold'),
+            wraplength=380,
+            justify='center'
+        )
+
+        self.ik_status_label.pack(
+            pady=(5, 0)
+        )
+
+
+        # ====================================================
+        # PESTAÑA DE CINEMÁTICA INVERSA (JACOBIANO)
+        # ====================================================
+
+        ikj_coords_frame = ttk.LabelFrame(
+            tab_ik_jacob,
+            text="Coordenada objetivo (mm)",
+            padding=8,
+            style='Section.TLabelframe'
+        )
+
+        ikj_coords_frame.pack(
+            fill='x',
+            pady=(0, 8)
+        )
+
+        self.ikj_entries = {}
+
+        for i, axis in enumerate(('X', 'Y', 'Z')):
+
+            label = ttk.Label(
+                ikj_coords_frame,
+                text=f"{axis}:"
+            )
+
+            label.grid(
+                row=0,
+                column=i * 2,
+                padx=(5, 3),
+                pady=5
+            )
+
+            entry = tk.Entry(
+                ikj_coords_frame,
+                width=8,
+                justify='center'
+            )
+
+            entry.insert(
+                0,
+                "0.0"
+            )
+
+            entry.grid(
+                row=0,
+                column=i * 2 + 1,
+                padx=(0, 10),
+                pady=5
+            )
+
+            self.ikj_entries[axis] = entry
+
+        ikj_send_button = ttk.Button(
+            tab_ik_jacob,
+            text="Calcular y enviar",
+            command=self.send_ik_jacob_target
+        )
+
+        ikj_send_button.pack(
+            pady=(0, 4)
+        )
+
+        ikj_home_button = ttk.Button(
+            tab_ik_jacob,
+            text="Home",
+            command=self.go_home_jacob
+        )
+
+        ikj_home_button.pack(
+            pady=(0, 8)
+        )
+
+
+        # ----------------------------------------------------
+        # RESULTADO (q1, q2, q3)
+        # ----------------------------------------------------
+
+        ikj_result_frame = ttk.LabelFrame(
+            tab_ik_jacob,
+            text="Resultado",
+            padding=8,
+            style='Section.TLabelframe'
+        )
+
+        ikj_result_frame.pack(
+            fill='x',
+            pady=(0, 8)
+        )
+
+        self.ikj_q_labels = []
+
+        for i, name in enumerate(
+            ('q1 (Hip Roll)', 'q2 (Hip Pitch)', 'q3 (Knee)')
+        ):
+
+            label = ttk.Label(
+                ikj_result_frame,
+                text=f"{name}:",
+                width=16
+            )
+
+            label.grid(
+                row=i,
+                column=0,
+                padx=(5, 5),
+                pady=3,
+                sticky='w'
+            )
+
+            value_label = ttk.Label(
+                ikj_result_frame,
+                text="--",
+                width=10
+            )
+
+            value_label.grid(
+                row=i,
+                column=1,
+                padx=(0, 5),
+                pady=3,
+                sticky='w'
+            )
+
+            self.ikj_q_labels.append(
+                value_label
+            )
+
+
+        # ----------------------------------------------------
+        # MENSAJE DE ESTADO (pestaña Jacobiano)
+        # ----------------------------------------------------
+
+        self.ikj_status_label = tk.Label(
+            tab_ik_jacob,
+            text="Ingrese objetivo y semilla, luego \"Calcular y enviar\".",
+            font=('Arial', 10, 'bold'),
+            wraplength=380,
+            justify='center'
+        )
+
+        self.ikj_status_label.pack(
+            pady=(5, 0)
         )
 
 
@@ -1030,6 +1427,284 @@ class TeleopNode(Node):
 
 
     # ========================================================
+    # CINEMÁTICA INVERSA - ENVIAR OBJETIVO
+    # ========================================================
+
+    def send_ik_target(self):
+
+        try:
+            x = float(self.ik_entries['X'].get())
+            y = float(self.ik_entries['Y'].get())
+            z = float(self.ik_entries['Z'].get())
+
+        except ValueError:
+
+            self.set_ik_status(
+                "Error: X, Y, Z deben ser valores numéricos.",
+                "red"
+            )
+
+            return
+
+        point = Point()
+        point.x = x
+        point.y = y
+        point.z = z
+
+        self.ik_target_pub.publish(point)
+
+        self.set_ik_status(
+            "Calculando...",
+            "gray"
+        )
+
+
+    # ========================================================
+    # CINEMÁTICA INVERSA - IR A HOME
+    # ========================================================
+
+    def go_home(self):
+
+        self.ik_entries['X'].delete(0, tk.END)
+        self.ik_entries['X'].insert(0, f"{HOME_X}")
+
+        self.ik_entries['Y'].delete(0, tk.END)
+        self.ik_entries['Y'].insert(0, f"{HOME_Y}")
+
+        self.ik_entries['Z'].delete(0, tk.END)
+        self.ik_entries['Z'].insert(0, f"{HOME_Z}")
+
+        self.send_ik_target()
+
+
+    # ========================================================
+    # CINEMÁTICA INVERSA - RECEPCIÓN DEL RESULTADO
+    # (hilo de ROS; solo guarda el dato, ver refresh())
+    # ========================================================
+
+    def on_ik_result(self, msg):
+
+        self.pending_ik_result = msg
+
+
+    # ========================================================
+    # CINEMÁTICA INVERSA - APLICAR RESULTADO
+    # (hilo de Tkinter, llamado desde refresh())
+    # ========================================================
+
+    def apply_ik_result(self, result):
+
+        if not result.reachable:
+
+            for label in self.ik_q_labels:
+                label.config(text="--")
+
+            self.set_ik_status(
+                "✗ Posición no alcanzable.",
+                "red"
+            )
+
+            return
+
+        q_deg = [math.degrees(q) for q in result.position]
+
+        for label, value in zip(self.ik_q_labels, q_deg):
+            label.config(text=f"{value:.2f}°")
+
+
+        # ----------------------------------------------------
+        # Movemos el modelo en RViz por el mismo camino que la
+        # pestaña de cinemática directa (kinematics_node ->
+        # control_node -> robot_state_publisher).
+        # ----------------------------------------------------
+
+        command_msg = RobotCommand()
+        command_msg.position = list(result.position)
+        self.command_pub.publish(command_msg)
+
+
+        # ----------------------------------------------------
+        # Sincronizamos sliders/entradas/matriz de la pestaña
+        # de cinemática directa con la nueva pose, para que
+        # ambas pestañas muestren siempre el mismo estado.
+        # ----------------------------------------------------
+
+        for i in range(min(self.num_joints, len(q_deg))):
+
+            self.target_deg[i] = q_deg[i]
+
+            self.sliders[i].set(q_deg[i])
+
+            self.slider_labels[i].config(
+                text=f"{q_deg[i]:.1f}°"
+            )
+
+            self.entries[i].delete(0, tk.END)
+            self.entries[i].insert(0, f"{q_deg[i]:.1f}")
+
+        self.update_kinematics()
+
+        self.set_ik_status(
+            "✓ Movimiento realizado.",
+            "green"
+        )
+
+
+    # ========================================================
+    # CINEMÁTICA INVERSA - MENSAJE DE ESTADO
+    # ========================================================
+
+    def set_ik_status(self, message, color):
+
+        self.ik_status_label.config(
+            text=message,
+            foreground=color
+        )
+
+
+    # ========================================================
+    # CINEMÁTICA INVERSA (JACOBIANO) - ENVIAR OBJETIVO
+    # ========================================================
+
+    def send_ik_jacob_target(self):
+
+        try:
+            x = float(self.ikj_entries['X'].get())
+            y = float(self.ikj_entries['Y'].get())
+            z = float(self.ikj_entries['Z'].get())
+
+        except ValueError:
+
+            self.set_ik_jacob_status(
+                "Error: X, Y, Z deben ser valores numéricos.",
+                "red"
+            )
+
+            return
+
+        # La semilla no se pide al usuario: se toma la pose
+        # articular actual (self.target_deg), que es la misma
+        # que se ve en la pestaña de cinemática directa.
+
+        target = IKJacobTarget()
+        target.x = x
+        target.y = y
+        target.z = z
+        target.q1_seed = self.target_deg[0]
+        target.q2_seed = self.target_deg[1]
+        target.q3_seed = self.target_deg[2]
+
+        self.ik_jacob_target_pub.publish(target)
+
+        self.set_ik_jacob_status(
+            "Calculando...",
+            "gray"
+        )
+
+
+    # ========================================================
+    # CINEMÁTICA INVERSA (JACOBIANO) - IR A HOME
+    # ========================================================
+
+    def go_home_jacob(self):
+
+        self.ikj_entries['X'].delete(0, tk.END)
+        self.ikj_entries['X'].insert(0, f"{HOME_X}")
+
+        self.ikj_entries['Y'].delete(0, tk.END)
+        self.ikj_entries['Y'].insert(0, f"{HOME_Y}")
+
+        self.ikj_entries['Z'].delete(0, tk.END)
+        self.ikj_entries['Z'].insert(0, f"{HOME_Z}")
+
+        self.send_ik_jacob_target()
+
+
+    # ========================================================
+    # CINEMÁTICA INVERSA (JACOBIANO) - RECEPCIÓN DEL RESULTADO
+    # (hilo de ROS; solo guarda el dato, ver refresh())
+    # ========================================================
+
+    def on_ik_jacob_result(self, msg):
+
+        self.pending_ik_jacob_result = msg
+
+
+    # ========================================================
+    # CINEMÁTICA INVERSA (JACOBIANO) - APLICAR RESULTADO
+    # (hilo de Tkinter, llamado desde refresh())
+    # ========================================================
+
+    def apply_ik_jacob_result(self, result):
+
+        if not result.reachable:
+
+            for label in self.ikj_q_labels:
+                label.config(text="--")
+
+            self.set_ik_jacob_status(
+                "✗ No convergió / posición no alcanzable.",
+                "red"
+            )
+
+            return
+
+        q_deg = [math.degrees(q) for q in result.position]
+
+        for label, value in zip(self.ikj_q_labels, q_deg):
+            label.config(text=f"{value:.2f}°")
+
+
+        # ----------------------------------------------------
+        # Movemos el modelo en RViz por el mismo camino que las
+        # demás pestañas (kinematics_node -> control_node ->
+        # robot_state_publisher).
+        # ----------------------------------------------------
+
+        command_msg = RobotCommand()
+        command_msg.position = list(result.position)
+        self.command_pub.publish(command_msg)
+
+
+        # ----------------------------------------------------
+        # Sincronizamos sliders/entradas/matriz de la pestaña
+        # de cinemática directa con la nueva pose.
+        # ----------------------------------------------------
+
+        for i in range(min(self.num_joints, len(q_deg))):
+
+            self.target_deg[i] = q_deg[i]
+
+            self.sliders[i].set(q_deg[i])
+
+            self.slider_labels[i].config(
+                text=f"{q_deg[i]:.1f}°"
+            )
+
+            self.entries[i].delete(0, tk.END)
+            self.entries[i].insert(0, f"{q_deg[i]:.1f}")
+
+        self.update_kinematics()
+
+        self.set_ik_jacob_status(
+            "✓ Movimiento realizado.",
+            "green"
+        )
+
+
+    # ========================================================
+    # CINEMÁTICA INVERSA (JACOBIANO) - MENSAJE DE ESTADO
+    # ========================================================
+
+    def set_ik_jacob_status(self, message, color):
+
+        self.ikj_status_label.config(
+            text=message,
+            foreground=color
+        )
+
+
+    # ========================================================
     # CINEMÁTICA DIRECTA
     # ========================================================
 
@@ -1237,6 +1912,29 @@ class TeleopNode(Node):
     # ========================================================
 
     def refresh(self):
+
+        # ----------------------------------------------------
+        # Si llegó un resultado nuevo de cinemática inversa,
+        # lo aplicamos acá (hilo de Tkinter), nunca dentro de
+        # on_ik_result (hilo de ROS).
+        # ----------------------------------------------------
+
+        if self.pending_ik_result is not None:
+
+            self.apply_ik_result(
+                self.pending_ik_result
+            )
+
+            self.pending_ik_result = None
+
+        if self.pending_ik_jacob_result is not None:
+
+            self.apply_ik_jacob_result(
+                self.pending_ik_jacob_result
+            )
+
+            self.pending_ik_jacob_result = None
+
 
         # ----------------------------------------------------
         # Reflejamos en la GUI el último ángulo real recibido

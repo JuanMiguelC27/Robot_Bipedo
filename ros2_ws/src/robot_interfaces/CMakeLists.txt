@@ -8,6 +8,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   msg/RobotCommand.msg
   msg/JointTarget.msg
   msg/JointState.msg
+  msg/IKResult.msg
+  msg/IKJacobTarget.msg
 )
 
 ament_export_dependencies(rosidl_default_runtime)

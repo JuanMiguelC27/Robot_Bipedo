@@ -13,23 +13,37 @@ Este launch inicia:
        - Calcula/procesa la cinemática.
        - Publica /robot/joint_targets.
 
-    3. control_node
+    3. ik_node
+       - Recibe una coordenada (x, y, z) en /robot/ik_target.
+       - Calcula q1, q2, q3 (cinemática inversa algebraica).
+       - Publica el resultado en /robot/ik_result.
+
+    3.1. ik_jacob_node
+       - Recibe (x, y, z) + semilla (q1,q2,q3) en
+         /robot/ik_jacob_target.
+       - Calcula q1, q2, q3 (cinemática inversa iterativa,
+         método del jacobiano).
+       - Publica el resultado en /robot/ik_jacob_result.
+
+    4. control_node
        - Recibe /robot/joint_targets.
        - Aplica los límites de seguridad articulares.
        - Publica /robot/joint_states.
        - Publica /robot/joint_commands.
 
-    4. sim_bridge
+    5. sim_bridge
        - Conecta los comandos de articulación con la simulación.
 
-    5. teleop_node
-       - Abre la interfaz gráfica.
-       - Permite controlar las tres articulaciones.
-       - Publica /robot/command.
-       - Publica /servo_commands.
-       - Muestra la cinemática directa de la pierna izquierda.
+    6. teleop_node
+       - Abre la interfaz gráfica, con dos pestañas:
+           - Cinemática directa: sliders/ángulos manuales,
+             publica /robot/command y /servo_commands.
+           - Cinemática inversa: coordenada X,Y,Z, publica
+             /robot/ik_target y aplica el resultado recibido
+             por /robot/ik_result.
+       - Muestra la cinemática de la pierna izquierda.
 
-    6. RViz2
+    7. RViz2
        - Visualiza el modelo de la pierna y sus movimientos.
 
 IMPORTANTE:
@@ -191,6 +205,44 @@ def generate_launch_description():
 
 
     # ==================================================================
+    # 2.1. NODO DE CINEMÁTICA INVERSA
+    # ==================================================================
+
+    ik = Node(
+        package='robot_kinematics',
+
+        executable='ik_node',
+
+        name='ik_node',
+
+        parameters=[
+            {
+                'leg_side': 'left'
+            }
+        ]
+    )
+
+
+    # ==================================================================
+    # 2.2. NODO DE CINEMÁTICA INVERSA (JACOBIANO)
+    # ==================================================================
+
+    ik_jacob = Node(
+        package='robot_kinematics',
+
+        executable='ik_jacob_node',
+
+        name='ik_jacob_node',
+
+        parameters=[
+            {
+                'leg_side': 'left'
+            }
+        ]
+    )
+
+
+    # ==================================================================
     # 3. NODO DE CONTROL
     # ==================================================================
 
@@ -329,6 +381,8 @@ def generate_launch_description():
         # Nodos.
         description,
         kinematics,
+        ik,
+        ik_jacob,
         control,
         sim,
         teleop,

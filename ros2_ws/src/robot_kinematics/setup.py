@@ -25,6 +25,8 @@ setup(
     entry_points={
         'console_scripts': [
             'kinematics_node = robot_kinematics.kinematics_node:main',
+            'ik_node = robot_kinematics.ik_node:main',
+            'ik_jacob_node = robot_kinematics.ik_jacob_node:main',
         ],
     },
 )
