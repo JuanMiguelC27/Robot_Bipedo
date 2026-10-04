@@ -40,6 +40,7 @@ from robot_interfaces.msg import (
 )
 from std_msgs.msg import Float32MultiArray
 from geometry_msgs.msg import Point
+from visualization_msgs.msg import Marker
 
 import tkinter as tk
 from tkinter import ttk
@@ -55,6 +56,8 @@ from robot_kinematics.kinem_leg_gen import (
     get_position
 )
 
+from robot_kinematics.kinem_invers_leg_mth import verificar_con_mth
+
 
 # ------------------------------------------------------------
 # POSICIÓN DE "HOME" PARA LA PESTAÑA DE CINEMÁTICA INVERSA (mm)
@@ -63,6 +66,52 @@ from robot_kinematics.kinem_leg_gen import (
 HOME_X = 709.02
 HOME_Y = 0.0
 HOME_Z = 200.4
+
+
+# ============================================================
+# TRAYECTORIA "CORAZÓN" (demo)
+# ============================================================
+#
+# Genera los puntos de un corazón clásico (curva de Taylor),
+# centrados en (0, 0) y escalados para que su altura total sea
+# `scale_mm` milímetros, conservando la proporción natural de
+# la curva (no se deforma). Devuelve deltas (dy, dz) en mm,
+# pensados para sumarse a un centro (Y, Z) fijo mientras X se
+# mantiene constante, es decir, el corazón se traza en el
+# plano Y-Z.
+#
+# ============================================================
+
+def _heart_curve_points(scale_mm, n_points=72):
+
+    raw_points = []
+
+    for i in range(n_points):
+
+        t = 2 * math.pi * i / n_points
+
+        hx = 16 * (math.sin(t) ** 3)
+
+        hy = (
+            13 * math.cos(t)
+            - 5 * math.cos(2 * t)
+            - 2 * math.cos(3 * t)
+            - math.cos(4 * t)
+        )
+
+        raw_points.append((hx, hy))
+
+    hy_values = [point[1] for point in raw_points]
+
+    hy_center = (min(hy_values) + max(hy_values)) / 2.0
+    raw_height = max(hy_values) - min(hy_values)
+
+    factor = scale_mm / raw_height
+
+    return [
+        (hx * factor, (hy - hy_center) * factor)
+        for hx, hy in raw_points
+    ]
 
 
 # ============================================================
@@ -284,6 +333,41 @@ class TeleopNode(Node):
         self.pending_ik_result = None
 
 
+        # ----------------------------------------------------
+        # Estado de la trayectoria "corazón" (demo, pestaña de
+        # IK algebraica): lista de puntos (x, y, z) en mm a
+        # visitar, índice del punto actual, bandera de si está
+        # corriendo, e id del root.after() pendiente (para
+        # poder cancelarlo con el botón "Detener").
+        # ----------------------------------------------------
+
+        self.heart_points = []
+        self.heart_index = 0
+        self.heart_running = False
+        self.heart_after_id = None
+        self.heart_interval_ms = 150
+
+
+        # ----------------------------------------------------
+        # RASTRO DEL RECORRIDO (verificación visual en RViz)
+        #
+        # Cada vez que un objetivo de cinemática inversa es
+        # alcanzable y se aplica (en cualquiera de las 3
+        # pestañas de IK), se agrega el punto a esta lista y se
+        # publica como un Marker tipo LINE_STRIP, en el mismo
+        # frame que usa la cinemática (Base_link), para poder
+        # ver en RViz el camino real que fue recorriendo el pie.
+        # ----------------------------------------------------
+
+        self.trail_points = []
+
+        self.trail_pub = self.create_publisher(
+            Marker,
+            '/robot/ik_trail',
+            10
+        )
+
+
         # ====================================================
         # CINEMÁTICA INVERSA - MÉTODO DEL JACOBIANO
         # (vía ik_jacob_node, por tópicos)
@@ -303,6 +387,43 @@ class TeleopNode(Node):
         )
 
         self.pending_ik_jacob_result = None
+
+
+        # ====================================================
+        # CINEMÁTICA INVERSA - MÉTODO DE DESACOPLE
+        # (vía ik_des_node, por tópicos)
+        # ====================================================
+
+        self.ik_des_target_pub = self.create_publisher(
+            Point,
+            '/robot/ik_des_target',
+            10
+        )
+
+        self.ik_des_result_sub = self.create_subscription(
+            IKResult,
+            '/robot/ik_des_result',
+            self.on_ik_des_result,
+            10
+        )
+
+        self.pending_ik_des_result = None
+
+
+        # ====================================================
+        # VERIFICACIÓN MTH (matriz de transformación homogénea)
+        #
+        # No usa tópicos: es un cálculo cerrado (sin iteraciones)
+        # que se llama directamente desde la GUI, igual que ya se
+        # hace con la cinemática directa de kinem_leg_gen. Guarda
+        # el último objetivo (x, y, z) pedido en cada pestaña de
+        # IK para poder comparar contra la posición que realmente
+        # produce la pose calculada.
+        # ====================================================
+
+        self.last_ik_target = None
+        self.last_ik_jacob_target = None
+        self.last_ik_des_target = None
 
 
         # ====================================================
@@ -425,6 +546,11 @@ class TeleopNode(Node):
             padding=8
         )
 
+        tab_ik_des = ttk.Frame(
+            notebook,
+            padding=8
+        )
+
         notebook.add(
             tab_fk,
             text="Cinemática directa"
@@ -438,6 +564,11 @@ class TeleopNode(Node):
         notebook.add(
             tab_ik_jacob,
             text="Cinemática inversa (Jacobiano)"
+        )
+
+        notebook.add(
+            tab_ik_des,
+            text="Cinemática inversa (Desacople)"
         )
 
 
@@ -940,9 +1071,10 @@ class TeleopNode(Node):
             pady=(5, 0)
         )
 
-        ik_home_button = ttk.Button(
+        ik_home_button = tk.Button(
             ik_coords_frame,
             text="Home",
+            bg='#ffdddd',
             command=self.go_home
         )
 
@@ -1007,6 +1139,149 @@ class TeleopNode(Node):
             self.ik_q_labels.append(
                 value_label
             )
+
+
+        # ----------------------------------------------------
+        # APLICAR A HARDWARE (ESP32 real)
+        #
+        # Envía por /servo_commands la última consigna calculada
+        # (self.target_deg, ya sincronizada con el resultado de
+        # esta pestaña). La previsualización en RViz ya ocurre
+        # sola al calcular, por /robot/command.
+        # ----------------------------------------------------
+
+        ik_hardware_button = tk.Button(
+            tab_ik,
+            text="Aplicar a motores (HARDWARE)",
+            bg='#ffdddd',
+            command=lambda: self.apply_to_hardware(self.set_ik_status)
+        )
+
+        ik_hardware_button.pack(
+            pady=(0, 8)
+        )
+
+
+        # ----------------------------------------------------
+        # TRAYECTORIA "CORAZÓN" (demo)
+        #
+        # Genera automáticamente una lista de puntos (x, y, z) y
+        # los va enviando uno por uno a la cinemática inversa
+        # algebraica, con una pausa entre cada uno. X se mantiene
+        # fijo (el valor actual del campo "X"); el corazón se
+        # traza en el plano Y-Z, centrado en los valores actuales
+        # de los campos "Y" y "Z".
+        # ----------------------------------------------------
+
+        heart_frame = ttk.LabelFrame(
+            tab_ik,
+            text="Trayectoria: corazón (demo)",
+            padding=8,
+            style='Section.TLabelframe'
+        )
+
+        heart_frame.pack(
+            fill='x',
+            pady=(0, 8)
+        )
+
+        ttk.Label(
+            heart_frame,
+            text="Tamaño (mm):"
+        ).grid(
+            row=0,
+            column=0,
+            padx=(5, 3),
+            pady=5
+        )
+
+        self.heart_scale_entry = tk.Entry(
+            heart_frame,
+            width=8,
+            justify='center'
+        )
+
+        self.heart_scale_entry.insert(0, "100")
+
+        self.heart_scale_entry.grid(
+            row=0,
+            column=1,
+            padx=(0, 10),
+            pady=5
+        )
+
+        ttk.Label(
+            heart_frame,
+            text="Intervalo (ms):"
+        ).grid(
+            row=0,
+            column=2,
+            padx=(5, 3),
+            pady=5
+        )
+
+        self.heart_interval_entry = tk.Entry(
+            heart_frame,
+            width=8,
+            justify='center'
+        )
+
+        self.heart_interval_entry.insert(0, "150")
+
+        self.heart_interval_entry.grid(
+            row=0,
+            column=3,
+            padx=(0, 10),
+            pady=5
+        )
+
+        heart_start_button = ttk.Button(
+            heart_frame,
+            text="Dibujar corazón",
+            command=self.start_heart_trajectory
+        )
+
+        heart_start_button.grid(
+            row=1,
+            column=0,
+            columnspan=2,
+            pady=(5, 0)
+        )
+
+        heart_stop_button = tk.Button(
+            heart_frame,
+            text="Detener",
+            bg='#ffdddd',
+            command=self.stop_heart_trajectory
+        )
+
+        heart_stop_button.grid(
+            row=1,
+            column=2,
+            columnspan=2,
+            pady=(5, 0)
+        )
+
+        heart_clear_trail_button = tk.Button(
+            heart_frame,
+            text="Limpiar rastro (RViz)",
+            bg='#ddeeff',
+            command=self.clear_trail
+        )
+
+        heart_clear_trail_button.grid(
+            row=2,
+            column=0,
+            columnspan=4,
+            pady=(5, 0)
+        )
+
+
+        # ----------------------------------------------------
+        # VERIFICACIÓN MTH DEL RESULTADO
+        # ----------------------------------------------------
+
+        self.ik_mth = self.build_mth_verification(tab_ik)
 
 
         # ----------------------------------------------------
@@ -1088,9 +1363,10 @@ class TeleopNode(Node):
             pady=(0, 4)
         )
 
-        ikj_home_button = ttk.Button(
+        ikj_home_button = tk.Button(
             tab_ik_jacob,
             text="Home",
+            bg='#ffdddd',
             command=self.go_home_jacob
         )
 
@@ -1155,6 +1431,29 @@ class TeleopNode(Node):
 
 
         # ----------------------------------------------------
+        # APLICAR A HARDWARE (ESP32 real)
+        # ----------------------------------------------------
+
+        ikj_hardware_button = tk.Button(
+            tab_ik_jacob,
+            text="Aplicar a motores (HARDWARE)",
+            bg='#ffdddd',
+            command=lambda: self.apply_to_hardware(self.set_ik_jacob_status)
+        )
+
+        ikj_hardware_button.pack(
+            pady=(0, 8)
+        )
+
+
+        # ----------------------------------------------------
+        # VERIFICACIÓN MTH DEL RESULTADO
+        # ----------------------------------------------------
+
+        self.ikj_mth = self.build_mth_verification(tab_ik_jacob)
+
+
+        # ----------------------------------------------------
         # MENSAJE DE ESTADO (pestaña Jacobiano)
         # ----------------------------------------------------
 
@@ -1167,6 +1466,181 @@ class TeleopNode(Node):
         )
 
         self.ikj_status_label.pack(
+            pady=(5, 0)
+        )
+
+
+        # ====================================================
+        # PESTAÑA DE CINEMÁTICA INVERSA (DESACOPLE)
+        # ====================================================
+
+        ikd_coords_frame = ttk.LabelFrame(
+            tab_ik_des,
+            text="Coordenada objetivo (mm)",
+            padding=8,
+            style='Section.TLabelframe'
+        )
+
+        ikd_coords_frame.pack(
+            fill='x',
+            pady=(0, 8)
+        )
+
+        self.ikd_entries = {}
+
+        for i, axis in enumerate(('X', 'Y', 'Z')):
+
+            label = ttk.Label(
+                ikd_coords_frame,
+                text=f"{axis}:"
+            )
+
+            label.grid(
+                row=0,
+                column=i * 2,
+                padx=(5, 3),
+                pady=5
+            )
+
+            entry = tk.Entry(
+                ikd_coords_frame,
+                width=8,
+                justify='center'
+            )
+
+            entry.insert(
+                0,
+                "0.0"
+            )
+
+            entry.grid(
+                row=0,
+                column=i * 2 + 1,
+                padx=(0, 10),
+                pady=5
+            )
+
+            self.ikd_entries[axis] = entry
+
+        ikd_send_button = ttk.Button(
+            ikd_coords_frame,
+            text="Calcular y enviar",
+            command=self.send_ik_des_target
+        )
+
+        ikd_send_button.grid(
+            row=1,
+            column=0,
+            columnspan=3,
+            pady=(5, 0)
+        )
+
+        ikd_home_button = tk.Button(
+            ikd_coords_frame,
+            text="Home",
+            bg='#ffdddd',
+            command=self.go_home_des
+        )
+
+        ikd_home_button.grid(
+            row=1,
+            column=3,
+            columnspan=3,
+            pady=(5, 0)
+        )
+
+
+        # ----------------------------------------------------
+        # RESULTADO (q1, q2, q3)
+        # ----------------------------------------------------
+
+        ikd_result_frame = ttk.LabelFrame(
+            tab_ik_des,
+            text="Resultado",
+            padding=8,
+            style='Section.TLabelframe'
+        )
+
+        ikd_result_frame.pack(
+            fill='x',
+            pady=(0, 8)
+        )
+
+        self.ikd_q_labels = []
+
+        for i, name in enumerate(
+            ('q1 (Hip Roll)', 'q2 (Hip Pitch)', 'q3 (Knee)')
+        ):
+
+            label = ttk.Label(
+                ikd_result_frame,
+                text=f"{name}:",
+                width=16
+            )
+
+            label.grid(
+                row=i,
+                column=0,
+                padx=(5, 5),
+                pady=3,
+                sticky='w'
+            )
+
+            value_label = ttk.Label(
+                ikd_result_frame,
+                text="--",
+                width=10
+            )
+
+            value_label.grid(
+                row=i,
+                column=1,
+                padx=(0, 5),
+                pady=3,
+                sticky='w'
+            )
+
+            self.ikd_q_labels.append(
+                value_label
+            )
+
+
+        # ----------------------------------------------------
+        # APLICAR A HARDWARE (ESP32 real)
+        # ----------------------------------------------------
+
+        ikd_hardware_button = tk.Button(
+            tab_ik_des,
+            text="Aplicar a motores (HARDWARE)",
+            bg='#ffdddd',
+            command=lambda: self.apply_to_hardware(self.set_ik_des_status)
+        )
+
+        ikd_hardware_button.pack(
+            pady=(0, 8)
+        )
+
+
+        # ----------------------------------------------------
+        # VERIFICACIÓN MTH DEL RESULTADO
+        # ----------------------------------------------------
+
+        self.ikd_mth = self.build_mth_verification(tab_ik_des)
+
+
+        # ----------------------------------------------------
+        # MENSAJE DE ESTADO (pestaña Desacople)
+        # ----------------------------------------------------
+
+        self.ikd_status_label = tk.Label(
+            tab_ik_des,
+            text="Ingrese una coordenada y presione \"Calcular y enviar\".",
+            font=('Arial', 10, 'bold'),
+            wraplength=380,
+            justify='center'
+        )
+
+        self.ikd_status_label.pack(
             pady=(5, 0)
         )
 
@@ -1402,7 +1876,19 @@ class TeleopNode(Node):
     # APLICAR A HARDWARE (ESP32 real, vía /servo_commands)
     # ========================================================
 
-    def apply_to_hardware(self):
+    def apply_to_hardware(self, set_status=None):
+
+        # Envía al hardware real la última consigna calculada,
+        # sea por los sliders (Cinemática directa) o por el
+        # resultado de cualquiera de las 3 pestañas de cinemática
+        # inversa: todas actualizan self.target_deg al llegar.
+        #
+        # set_status permite avisar en la pestaña desde la que se
+        # apretó el botón (si no se pasa, se usa la de Cinemática
+        # directa, por compatibilidad con el botón original).
+
+        if set_status is None:
+            set_status = self.set_status
 
         servo_msg = Float32MultiArray()
 
@@ -1420,8 +1906,8 @@ class TeleopNode(Node):
             servo_msg
         )
 
-        self.set_status(
-            "✓ Enviado al motor real (última consigna de los sliders).",
+        set_status(
+            "✓ Enviado al motor real (última consigna calculada).",
             "green"
         )
 
@@ -1445,6 +1931,8 @@ class TeleopNode(Node):
             )
 
             return
+
+        self.last_ik_target = (x, y, z)
 
         point = Point()
         point.x = x
@@ -1478,6 +1966,187 @@ class TeleopNode(Node):
 
 
     # ========================================================
+    # TRAYECTORIA "CORAZÓN" - GENERAR Y LANZAR
+    # ========================================================
+
+    def start_heart_trajectory(self):
+
+        try:
+            scale_mm = float(self.heart_scale_entry.get())
+            interval_ms = int(float(self.heart_interval_entry.get()))
+
+        except ValueError:
+
+            self.set_ik_status(
+                "Error: tamaño e intervalo deben ser numéricos.",
+                "red"
+            )
+
+            return
+
+        if interval_ms < 20:
+            interval_ms = 20
+
+        try:
+            cx = float(self.ik_entries['X'].get())
+            cy = float(self.ik_entries['Y'].get())
+            cz = float(self.ik_entries['Z'].get())
+
+        except ValueError:
+
+            self.set_ik_status(
+                "Error: X, Y, Z deben ser valores numéricos.",
+                "red"
+            )
+
+            return
+
+        # Cancela cualquier trayectoria previa que siga pendiente
+        # antes de lanzar una nueva.
+
+        self.stop_heart_trajectory()
+
+        deltas = _heart_curve_points(scale_mm)
+
+        self.heart_points = [
+            (cx, cy + dy, cz + dz)
+            for dy, dz in deltas
+        ]
+
+        self.heart_index = 0
+        self.heart_running = True
+        self.heart_interval_ms = interval_ms
+
+        self.set_ik_status(
+            f"Dibujando corazón... (0/{len(self.heart_points)})",
+            "blue"
+        )
+
+        self._heart_step()
+
+
+    # ========================================================
+    # TRAYECTORIA "CORAZÓN" - UN PASO
+    # (encadenado solo, vía root.after; no bloquea la GUI)
+    # ========================================================
+
+    def _heart_step(self):
+
+        if not self.heart_running:
+            return
+
+        if self.heart_index >= len(self.heart_points):
+
+            self.heart_running = False
+
+            self.set_ik_status(
+                "✓ Corazón completo.",
+                "green"
+            )
+
+            return
+
+        x, y, z = self.heart_points[self.heart_index]
+
+        self.ik_entries['X'].delete(0, tk.END)
+        self.ik_entries['X'].insert(0, f"{x:.2f}")
+
+        self.ik_entries['Y'].delete(0, tk.END)
+        self.ik_entries['Y'].insert(0, f"{y:.2f}")
+
+        self.ik_entries['Z'].delete(0, tk.END)
+        self.ik_entries['Z'].insert(0, f"{z:.2f}")
+
+        self.send_ik_target()
+
+        self.heart_index += 1
+
+        self.set_ik_status(
+            f"Dibujando corazón... "
+            f"({self.heart_index}/{len(self.heart_points)})",
+            "blue"
+        )
+
+        self.heart_after_id = self.root.after(
+            self.heart_interval_ms,
+            self._heart_step
+        )
+
+
+    # ========================================================
+    # TRAYECTORIA "CORAZÓN" - DETENER
+    # ========================================================
+
+    def stop_heart_trajectory(self):
+
+        self.heart_running = False
+
+        if self.heart_after_id is not None:
+
+            try:
+                self.root.after_cancel(self.heart_after_id)
+            except Exception:
+                pass
+
+            self.heart_after_id = None
+
+
+    # ========================================================
+    # RASTRO DEL RECORRIDO - AGREGAR PUNTO Y PUBLICAR
+    #
+    # x, y, z llegan en milímetros (igual que el resto de la
+    # cinemática); Marker/RViz trabajan en metros, por eso se
+    # dividen entre 1000 acá.
+    # ========================================================
+
+    def add_trail_point(self, x, y, z):
+
+        point = Point()
+        point.x = x / 1000.0
+        point.y = y / 1000.0
+        point.z = z / 1000.0
+
+        self.trail_points.append(point)
+
+        self.publish_trail()
+
+
+    def publish_trail(self):
+
+        marker = Marker()
+
+        marker.header.frame_id = 'Base_link'
+        marker.header.stamp = self.get_clock().now().to_msg()
+
+        marker.ns = 'ik_trail'
+        marker.id = 0
+        marker.type = Marker.LINE_STRIP
+        marker.action = Marker.ADD
+
+        marker.scale.x = 0.005
+
+        marker.color.r = 1.0
+        marker.color.g = 0.1
+        marker.color.b = 0.5
+        marker.color.a = 1.0
+
+        marker.points = list(self.trail_points)
+
+        self.trail_pub.publish(marker)
+
+
+    # ========================================================
+    # RASTRO DEL RECORRIDO - LIMPIAR
+    # ========================================================
+
+    def clear_trail(self):
+
+        self.trail_points = []
+
+        self.publish_trail()
+
+
+    # ========================================================
     # CINEMÁTICA INVERSA - RECEPCIÓN DEL RESULTADO
     # (hilo de ROS; solo guarda el dato, ver refresh())
     # ========================================================
@@ -1503,6 +2172,8 @@ class TeleopNode(Node):
                 "✗ Posición no alcanzable.",
                 "red"
             )
+
+            self.reset_mth_verification(self.ik_mth)
 
             return
 
@@ -1544,6 +2215,15 @@ class TeleopNode(Node):
 
         self.update_kinematics()
 
+        if self.last_ik_target is not None:
+            x_obj, y_obj, z_obj = self.last_ik_target
+            self.update_mth_verification(
+                self.ik_mth,
+                result.position[0], result.position[1], result.position[2],
+                x_obj, y_obj, z_obj
+            )
+            self.add_trail_point(x_obj, y_obj, z_obj)
+
         self.set_ik_status(
             "✓ Movimiento realizado.",
             "green"
@@ -1581,6 +2261,8 @@ class TeleopNode(Node):
             )
 
             return
+
+        self.last_ik_jacob_target = (x, y, z)
 
         # La semilla no se pide al usuario: se toma la pose
         # articular actual (self.target_deg), que es la misma
@@ -1647,6 +2329,8 @@ class TeleopNode(Node):
                 "red"
             )
 
+            self.reset_mth_verification(self.ikj_mth)
+
             return
 
         q_deg = [math.degrees(q) for q in result.position]
@@ -1686,6 +2370,15 @@ class TeleopNode(Node):
 
         self.update_kinematics()
 
+        if self.last_ik_jacob_target is not None:
+            x_obj, y_obj, z_obj = self.last_ik_jacob_target
+            self.update_mth_verification(
+                self.ikj_mth,
+                result.position[0], result.position[1], result.position[2],
+                x_obj, y_obj, z_obj
+            )
+            self.add_trail_point(x_obj, y_obj, z_obj)
+
         self.set_ik_jacob_status(
             "✓ Movimiento realizado.",
             "green"
@@ -1701,6 +2394,287 @@ class TeleopNode(Node):
         self.ikj_status_label.config(
             text=message,
             foreground=color
+        )
+
+
+    # ========================================================
+    # CINEMÁTICA INVERSA (DESACOPLE) - ENVIAR OBJETIVO
+    # ========================================================
+
+    def send_ik_des_target(self):
+
+        try:
+            x = float(self.ikd_entries['X'].get())
+            y = float(self.ikd_entries['Y'].get())
+            z = float(self.ikd_entries['Z'].get())
+
+        except ValueError:
+
+            self.set_ik_des_status(
+                "Error: X, Y, Z deben ser valores numéricos.",
+                "red"
+            )
+
+            return
+
+        self.last_ik_des_target = (x, y, z)
+
+        point = Point()
+        point.x = x
+        point.y = y
+        point.z = z
+
+        self.ik_des_target_pub.publish(point)
+
+        self.set_ik_des_status(
+            "Calculando...",
+            "gray"
+        )
+
+
+    # ========================================================
+    # CINEMÁTICA INVERSA (DESACOPLE) - IR A HOME
+    # ========================================================
+
+    def go_home_des(self):
+
+        self.ikd_entries['X'].delete(0, tk.END)
+        self.ikd_entries['X'].insert(0, f"{HOME_X}")
+
+        self.ikd_entries['Y'].delete(0, tk.END)
+        self.ikd_entries['Y'].insert(0, f"{HOME_Y}")
+
+        self.ikd_entries['Z'].delete(0, tk.END)
+        self.ikd_entries['Z'].insert(0, f"{HOME_Z}")
+
+        self.send_ik_des_target()
+
+
+    # ========================================================
+    # CINEMÁTICA INVERSA (DESACOPLE) - RECEPCIÓN DEL RESULTADO
+    # (hilo de ROS; solo guarda el dato, ver refresh())
+    # ========================================================
+
+    def on_ik_des_result(self, msg):
+
+        self.pending_ik_des_result = msg
+
+
+    # ========================================================
+    # CINEMÁTICA INVERSA (DESACOPLE) - APLICAR RESULTADO
+    # (hilo de Tkinter, llamado desde refresh())
+    # ========================================================
+
+    def apply_ik_des_result(self, result):
+
+        if not result.reachable:
+
+            for label in self.ikd_q_labels:
+                label.config(text="--")
+
+            self.set_ik_des_status(
+                "✗ Posición no alcanzable.",
+                "red"
+            )
+
+            self.reset_mth_verification(self.ikd_mth)
+
+            return
+
+        q_deg = [math.degrees(q) for q in result.position]
+
+        for label, value in zip(self.ikd_q_labels, q_deg):
+            label.config(text=f"{value:.2f}°")
+
+
+        # ----------------------------------------------------
+        # Movemos el modelo en RViz por el mismo camino que las
+        # demás pestañas (kinematics_node -> control_node ->
+        # robot_state_publisher).
+        # ----------------------------------------------------
+
+        command_msg = RobotCommand()
+        command_msg.position = list(result.position)
+        self.command_pub.publish(command_msg)
+
+
+        # ----------------------------------------------------
+        # Sincronizamos sliders/entradas/matriz de la pestaña
+        # de cinemática directa con la nueva pose.
+        # ----------------------------------------------------
+
+        for i in range(min(self.num_joints, len(q_deg))):
+
+            self.target_deg[i] = q_deg[i]
+
+            self.sliders[i].set(q_deg[i])
+
+            self.slider_labels[i].config(
+                text=f"{q_deg[i]:.1f}°"
+            )
+
+            self.entries[i].delete(0, tk.END)
+            self.entries[i].insert(0, f"{q_deg[i]:.1f}")
+
+        self.update_kinematics()
+
+        if self.last_ik_des_target is not None:
+            x_obj, y_obj, z_obj = self.last_ik_des_target
+            self.update_mth_verification(
+                self.ikd_mth,
+                result.position[0], result.position[1], result.position[2],
+                x_obj, y_obj, z_obj
+            )
+            self.add_trail_point(x_obj, y_obj, z_obj)
+
+        self.set_ik_des_status(
+            "✓ Movimiento realizado.",
+            "green"
+        )
+
+
+    # ========================================================
+    # CINEMÁTICA INVERSA (DESACOPLE) - MENSAJE DE ESTADO
+    # ========================================================
+
+    def set_ik_des_status(self, message, color):
+
+        self.ikd_status_label.config(
+            text=message,
+            foreground=color
+        )
+
+
+    # ========================================================
+    # VERIFICACIÓN MTH - CONSTRUCCIÓN DEL WIDGET
+    #
+    # Se llama una vez por cada pestaña de cinemática inversa
+    # (algebraica, Jacobiano, desacople). Devuelve un diccionario
+    # con las referencias gráficas que después actualizan
+    # update_mth_verification() / reset_mth_verification().
+    # ========================================================
+
+    def build_mth_verification(self, parent):
+
+        frame = ttk.LabelFrame(
+            parent,
+            text="Verificación MTH (matriz de transformación homogénea)",
+            padding=8,
+            style='Section.TLabelframe'
+        )
+
+        frame.pack(
+            fill='x',
+            pady=(0, 8)
+        )
+
+        matrix_frame = ttk.Frame(frame)
+
+        matrix_frame.pack(
+            pady=(0, 5)
+        )
+
+        matrix_labels = []
+
+        for row in range(4):
+
+            matrix_row = []
+
+            for col in range(4):
+
+                label = tk.Label(
+                    matrix_frame,
+                    text="--",
+                    width=10,
+                    relief='ridge',
+                    borderwidth=1,
+                    anchor='center'
+                )
+
+                label.grid(
+                    row=row,
+                    column=col,
+                    padx=1,
+                    pady=1
+                )
+
+                matrix_row.append(label)
+
+            matrix_labels.append(matrix_row)
+
+        status_label = tk.Label(
+            frame,
+            text="Sin verificar todavía.",
+            font=('Arial', 9, 'bold'),
+            anchor='center'
+        )
+
+        status_label.pack(
+            pady=(2, 0)
+        )
+
+        return {
+            'matrix_labels': matrix_labels,
+            'status_label': status_label,
+        }
+
+
+    # ========================================================
+    # VERIFICACIÓN MTH - ACTUALIZAR CON UN RESULTADO
+    #
+    # Arma Tdes a partir del (q1,q2,q3) que calculó el método de
+    # la pestaña (algebraico / Jacobiano / desacople), le pide al
+    # método MTH que recupere esos mismos ángulos leyendo la
+    # matriz, y muestra la comparación.
+    # ========================================================
+
+    def update_mth_verification(
+        self, mth_widgets, q1, q2, q3, x_obj, y_obj, z_obj
+    ):
+
+        resultado = verificar_con_mth(q1, q2, q3, x_obj, y_obj, z_obj)
+
+        T = resultado['T']
+
+        for row in range(4):
+            for col in range(4):
+                mth_widgets['matrix_labels'][row][col].config(
+                    text=f"{T[row, col]:.4f}"
+                )
+
+        if not resultado['ok']:
+
+            mth_widgets['status_label'].config(
+                text="✗ La verificación MTH no coincide (revisar).",
+                foreground='red'
+            )
+
+            return
+
+        mth_widgets['status_label'].config(
+            text=(
+                f"✓ MTH verificado — error posición: "
+                f"{resultado['pos_error']:.4f} mm · "
+                f"error ángulos: "
+                f"{math.degrees(resultado['q_error']):.5f}°"
+            ),
+            foreground='dark green'
+        )
+
+
+    # ========================================================
+    # VERIFICACIÓN MTH - LIMPIAR (cuando no hubo solución)
+    # ========================================================
+
+    def reset_mth_verification(self, mth_widgets):
+
+        for row in mth_widgets['matrix_labels']:
+            for label in row:
+                label.config(text="--")
+
+        mth_widgets['status_label'].config(
+            text="Sin verificar (no alcanzable).",
+            foreground='gray'
         )
 
 
@@ -1934,6 +2908,14 @@ class TeleopNode(Node):
             )
 
             self.pending_ik_jacob_result = None
+
+        if self.pending_ik_des_result is not None:
+
+            self.apply_ik_des_result(
+                self.pending_ik_des_result
+            )
+
+            self.pending_ik_des_result = None
 
 
         # ----------------------------------------------------

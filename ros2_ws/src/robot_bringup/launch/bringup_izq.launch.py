@@ -25,6 +25,11 @@ Este launch inicia:
          método del jacobiano).
        - Publica el resultado en /robot/ik_jacob_result.
 
+    3.2. ik_des_node
+       - Recibe una coordenada (x, y, z) en /robot/ik_des_target.
+       - Calcula q1, q2, q3 (cinemática inversa por desacople).
+       - Publica el resultado en /robot/ik_des_result.
+
     4. control_node
        - Recibe /robot/joint_targets.
        - Aplica los límites de seguridad articulares.
@@ -243,6 +248,25 @@ def generate_launch_description():
 
 
     # ==================================================================
+    # 2.3. NODO DE CINEMÁTICA INVERSA (DESACOPLE)
+    # ==================================================================
+
+    ik_des = Node(
+        package='robot_kinematics',
+
+        executable='ik_des_node',
+
+        name='ik_des_node',
+
+        parameters=[
+            {
+                'leg_side': 'left'
+            }
+        ]
+    )
+
+
+    # ==================================================================
     # 3. NODO DE CONTROL
     # ==================================================================
 
@@ -383,6 +407,7 @@ def generate_launch_description():
         kinematics,
         ik,
         ik_jacob,
+        ik_des,
         control,
         sim,
         teleop,
