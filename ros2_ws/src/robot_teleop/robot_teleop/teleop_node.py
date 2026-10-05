@@ -30,6 +30,7 @@
 # ------------------------------------------------------------
 
 import math
+import os
 import threading
 
 import rclpy
@@ -58,6 +59,18 @@ from robot_kinematics.kinem_leg_gen import (
 
 from robot_kinematics.kinem_invers_leg_mth import verificar_con_mth
 
+from robot_kinematics.kinem_invers_leg_algebraico import (
+    cinematica_inversa_pata_alg
+)
+
+from robot_kinematics.kinem_invers_leg_jacob import (
+    cinematica_inversa_pata_jacob
+)
+
+from robot_kinematics.kinem_invers_leg_mth_Desacople import (
+    cinematica_inversa_pata_des
+)
+
 
 # ------------------------------------------------------------
 # POSICIÓN DE "HOME" PARA LA PESTAÑA DE CINEMÁTICA INVERSA (mm)
@@ -69,49 +82,69 @@ HOME_Z = 200.4
 
 
 # ============================================================
-# TRAYECTORIA "CORAZÓN" (demo)
+# TRAYECTORIA DESDE ARCHIVO (pestaña de IK algebraica)
 # ============================================================
 #
-# Genera los puntos de un corazón clásico (curva de Taylor),
-# centrados en (0, 0) y escalados para que su altura total sea
-# `scale_mm` milímetros, conservando la proporción natural de
-# la curva (no se deforma). Devuelve deltas (dy, dz) en mm,
-# pensados para sumarse a un centro (Y, Z) fijo mientras X se
-# mantiene constante, es decir, el corazón se traza en el
-# plano Y-Z.
+# El archivo trayectoria.txt vive en
+# src/robot_kinematics/trayectorias/ y se instala con colcon en
+# share/robot_kinematics/trayectorias/. Después de editarlo hay
+# que volver a correr `colcon build`.
+#
+# Formato: una línea por punto "x, y, z" en mm (mismo sistema
+# de coordenadas que los campos X, Y, Z de la pestaña). Se
+# aceptan comas o espacios como separador; las líneas vacías y
+# lo que va después de '#' se ignoran.
 #
 # ============================================================
 
-def _heart_curve_points(scale_mm, n_points=72):
+TRAJECTORY_FILE_NAME = 'trayectoria.txt'
 
-    raw_points = []
 
-    for i in range(n_points):
+def _trajectory_file_path():
 
-        t = 2 * math.pi * i / n_points
+    from ament_index_python.packages import get_package_share_directory
 
-        hx = 16 * (math.sin(t) ** 3)
+    return os.path.join(
+        get_package_share_directory('robot_kinematics'),
+        'trayectorias',
+        TRAJECTORY_FILE_NAME
+    )
 
-        hy = (
-            13 * math.cos(t)
-            - 5 * math.cos(2 * t)
-            - 2 * math.cos(3 * t)
-            - math.cos(4 * t)
-        )
 
-        raw_points.append((hx, hy))
+def _load_trajectory_file(path):
 
-    hy_values = [point[1] for point in raw_points]
+    # Devuelve una lista de (n_linea, x, y, z). Lanza ValueError
+    # con el número de línea si alguna no tiene el formato.
 
-    hy_center = (min(hy_values) + max(hy_values)) / 2.0
-    raw_height = max(hy_values) - min(hy_values)
+    points = []
 
-    factor = scale_mm / raw_height
+    with open(path, 'r', encoding='utf-8') as f:
 
-    return [
-        (hx * factor, (hy - hy_center) * factor)
-        for hx, hy in raw_points
-    ]
+        for line_number, line in enumerate(f, start=1):
+
+            line = line.split('#', 1)[0].strip()
+
+            if not line:
+                continue
+
+            values = line.replace(',', ' ').split()
+
+            if len(values) != 3:
+                raise ValueError(
+                    f"línea {line_number}: se esperaban 3 valores "
+                    f"(x, y, z), hay {len(values)}."
+                )
+
+            try:
+                x, y, z = (float(v) for v in values)
+            except ValueError:
+                raise ValueError(
+                    f"línea {line_number}: valor no numérico."
+                )
+
+            points.append((line_number, x, y, z))
+
+    return points
 
 
 # ============================================================
@@ -334,18 +367,15 @@ class TeleopNode(Node):
 
 
         # ----------------------------------------------------
-        # Estado de la trayectoria "corazón" (demo, pestaña de
-        # IK algebraica): lista de puntos (x, y, z) en mm a
-        # visitar, índice del punto actual, bandera de si está
-        # corriendo, e id del root.after() pendiente (para
-        # poder cancelarlo con el botón "Detener").
+        # Trayectorias desde archivo, una por pestaña de IK
+        # ('alg', 'jacob', 'des'). Cada entrada guarda sus
+        # widgets (los llena build_trajectory_frame), la lista
+        # de puntos (x, y, z) en mm a visitar, el índice del
+        # punto actual, si está corriendo, y el id del
+        # root.after() pendiente (para cancelarlo con "Parar").
         # ----------------------------------------------------
 
-        self.heart_points = []
-        self.heart_index = 0
-        self.heart_running = False
-        self.heart_after_id = None
-        self.heart_interval_ms = 150
+        self.trajectories = {}
 
 
         # ----------------------------------------------------
@@ -1163,117 +1193,15 @@ class TeleopNode(Node):
 
 
         # ----------------------------------------------------
-        # TRAYECTORIA "CORAZÓN" (demo)
-        #
-        # Genera automáticamente una lista de puntos (x, y, z) y
-        # los va enviando uno por uno a la cinemática inversa
-        # algebraica, con una pausa entre cada uno. X se mantiene
-        # fijo (el valor actual del campo "X"); el corazón se
-        # traza en el plano Y-Z, centrado en los valores actuales
-        # de los campos "Y" y "Z".
+        # TRAYECTORIA DESDE ARCHIVO (trayectoria.txt)
         # ----------------------------------------------------
 
-        heart_frame = ttk.LabelFrame(
+        self.build_trajectory_frame(
             tab_ik,
-            text="Trayectoria: corazón (demo)",
-            padding=8,
-            style='Section.TLabelframe'
-        )
-
-        heart_frame.pack(
-            fill='x',
-            pady=(0, 8)
-        )
-
-        ttk.Label(
-            heart_frame,
-            text="Tamaño (mm):"
-        ).grid(
-            row=0,
-            column=0,
-            padx=(5, 3),
-            pady=5
-        )
-
-        self.heart_scale_entry = tk.Entry(
-            heart_frame,
-            width=8,
-            justify='center'
-        )
-
-        self.heart_scale_entry.insert(0, "100")
-
-        self.heart_scale_entry.grid(
-            row=0,
-            column=1,
-            padx=(0, 10),
-            pady=5
-        )
-
-        ttk.Label(
-            heart_frame,
-            text="Intervalo (ms):"
-        ).grid(
-            row=0,
-            column=2,
-            padx=(5, 3),
-            pady=5
-        )
-
-        self.heart_interval_entry = tk.Entry(
-            heart_frame,
-            width=8,
-            justify='center'
-        )
-
-        self.heart_interval_entry.insert(0, "150")
-
-        self.heart_interval_entry.grid(
-            row=0,
-            column=3,
-            padx=(0, 10),
-            pady=5
-        )
-
-        heart_start_button = ttk.Button(
-            heart_frame,
-            text="Dibujar corazón",
-            command=self.start_heart_trajectory
-        )
-
-        heart_start_button.grid(
-            row=1,
-            column=0,
-            columnspan=2,
-            pady=(5, 0)
-        )
-
-        heart_stop_button = tk.Button(
-            heart_frame,
-            text="Detener",
-            bg='#ffdddd',
-            command=self.stop_heart_trajectory
-        )
-
-        heart_stop_button.grid(
-            row=1,
-            column=2,
-            columnspan=2,
-            pady=(5, 0)
-        )
-
-        heart_clear_trail_button = tk.Button(
-            heart_frame,
-            text="Limpiar rastro (RViz)",
-            bg='#ddeeff',
-            command=self.clear_trail
-        )
-
-        heart_clear_trail_button.grid(
-            row=2,
-            column=0,
-            columnspan=4,
-            pady=(5, 0)
+            'alg',
+            self.ik_entries,
+            self.send_ik_target,
+            self.set_ik_status
         )
 
 
@@ -1443,6 +1371,19 @@ class TeleopNode(Node):
 
         ikj_hardware_button.pack(
             pady=(0, 8)
+        )
+
+
+        # ----------------------------------------------------
+        # TRAYECTORIA DESDE ARCHIVO (trayectoria.txt)
+        # ----------------------------------------------------
+
+        self.build_trajectory_frame(
+            tab_ik_jacob,
+            'jacob',
+            self.ikj_entries,
+            self.send_ik_jacob_target,
+            self.set_ik_jacob_status
         )
 
 
@@ -1618,6 +1559,19 @@ class TeleopNode(Node):
 
         ikd_hardware_button.pack(
             pady=(0, 8)
+        )
+
+
+        # ----------------------------------------------------
+        # TRAYECTORIA DESDE ARCHIVO (trayectoria.txt)
+        # ----------------------------------------------------
+
+        self.build_trajectory_frame(
+            tab_ik_des,
+            'des',
+            self.ikd_entries,
+            self.send_ik_des_target,
+            self.set_ik_des_status
         )
 
 
@@ -1966,19 +1920,169 @@ class TeleopNode(Node):
 
 
     # ========================================================
-    # TRAYECTORIA "CORAZÓN" - GENERAR Y LANZAR
+    # TRAYECTORIA DESDE ARCHIVO - WIDGETS DE UNA PESTAÑA
+    #
+    # Se llama una vez por cada pestaña de cinemática inversa.
+    # Lee los puntos (x, y, z) de trayectoria.txt, verifica que
+    # todos tengan solución con el método de esa pestaña y los
+    # va enviando uno por uno, con una pausa entre cada uno. Por
+    # defecto solo se mueve el modelo en RViz; con la casilla
+    # marcada también se envía cada punto a los motores reales.
     # ========================================================
 
-    def start_heart_trajectory(self):
+    def build_trajectory_frame(
+        self, parent, key, entries, send_target, set_status
+    ):
+
+        traj_frame = ttk.LabelFrame(
+            parent,
+            text=f"Trayectoria desde archivo ({TRAJECTORY_FILE_NAME})",
+            padding=8,
+            style='Section.TLabelframe'
+        )
+
+        traj_frame.pack(
+            fill='x',
+            pady=(0, 8)
+        )
+
+        ttk.Label(
+            traj_frame,
+            text="Intervalo (ms):"
+        ).grid(
+            row=0,
+            column=0,
+            padx=(5, 3),
+            pady=5
+        )
+
+        interval_entry = tk.Entry(
+            traj_frame,
+            width=8,
+            justify='center'
+        )
+
+        interval_entry.insert(0, "150")
+
+        interval_entry.grid(
+            row=0,
+            column=1,
+            padx=(0, 10),
+            pady=5
+        )
+
+        hardware_var = tk.BooleanVar(value=False)
+
+        tk.Checkbutton(
+            traj_frame,
+            text="Enviar también a motores",
+            variable=hardware_var
+        ).grid(
+            row=0,
+            column=2,
+            columnspan=2,
+            padx=(5, 3),
+            pady=5
+        )
+
+        ttk.Button(
+            traj_frame,
+            text="Seguir trayectoria",
+            command=lambda: self.start_file_trajectory(key)
+        ).grid(
+            row=1,
+            column=0,
+            columnspan=2,
+            pady=(5, 0)
+        )
+
+        tk.Button(
+            traj_frame,
+            text="Parar",
+            bg='#ffdddd',
+            command=lambda: self.stop_file_trajectory(key)
+        ).grid(
+            row=1,
+            column=2,
+            columnspan=2,
+            pady=(5, 0)
+        )
+
+        tk.Button(
+            traj_frame,
+            text="Limpiar rastro (RViz)",
+            bg='#ddeeff',
+            command=self.clear_trail
+        ).grid(
+            row=2,
+            column=0,
+            columnspan=4,
+            pady=(5, 0)
+        )
+
+        self.trajectories[key] = {
+            'entries': entries,
+            'send_target': send_target,
+            'set_status': set_status,
+            'interval_entry': interval_entry,
+            'hardware_var': hardware_var,
+            'points': [],
+            'index': 0,
+            'running': False,
+            'after_id': None,
+            'interval_ms': 150,
+        }
+
+
+    # ========================================================
+    # TRAYECTORIA DESDE ARCHIVO - VALIDAR TODOS LOS PUNTOS
+    #
+    # Resuelve cada punto con el mismo método de la pestaña.
+    # Para el Jacobiano se encadena la semilla igual que en la
+    # ejecución real: se parte de la pose actual y cada punto
+    # usa como semilla la solución del anterior. Devuelve el
+    # primer punto sin solución, o None si todos la tienen.
+    # ========================================================
+
+    def _first_unreachable_point(self, key, points):
+
+        seed_deg = list(self.target_deg)
+
+        for line_number, x, y, z in points:
+
+            if key == 'jacob':
+                q1, q2, q3, ok = cinematica_inversa_pata_jacob(
+                    x, y, z, *seed_deg
+                )
+            elif key == 'des':
+                q1, q2, q3, ok = cinematica_inversa_pata_des(x, y, z)
+            else:
+                q1, q2, q3, ok = cinematica_inversa_pata_alg(x, y, z)
+
+            if not ok:
+                return line_number, x, y, z
+
+            seed_deg = [math.degrees(q) for q in (q1, q2, q3)]
+
+        return None
+
+
+    # ========================================================
+    # TRAYECTORIA DESDE ARCHIVO - CARGAR, VALIDAR Y LANZAR
+    # ========================================================
+
+    def start_file_trajectory(self, key):
+
+        traj = self.trajectories[key]
+        set_status = traj['set_status']
 
         try:
-            scale_mm = float(self.heart_scale_entry.get())
-            interval_ms = int(float(self.heart_interval_entry.get()))
+            interval_ms = int(float(traj['interval_entry'].get()))
 
         except ValueError:
 
-            self.set_ik_status(
-                "Error: tamaño e intervalo deben ser numéricos.",
+            set_status(
+                "Error: el intervalo debe ser numérico.",
                 "red"
             )
 
@@ -1988,107 +2092,177 @@ class TeleopNode(Node):
             interval_ms = 20
 
         try:
-            cx = float(self.ik_entries['X'].get())
-            cy = float(self.ik_entries['Y'].get())
-            cz = float(self.ik_entries['Z'].get())
+            path = _trajectory_file_path()
+            points = _load_trajectory_file(path)
 
-        except ValueError:
+        except FileNotFoundError:
 
-            self.set_ik_status(
-                "Error: X, Y, Z deben ser valores numéricos.",
+            set_status(
+                f"Error: no se encontró {TRAJECTORY_FILE_NAME} "
+                f"(¿se corrió colcon build?).",
                 "red"
             )
 
             return
 
-        # Cancela cualquier trayectoria previa que siga pendiente
-        # antes de lanzar una nueva.
+        except Exception as error:
 
-        self.stop_heart_trajectory()
+            set_status(
+                f"Error en {TRAJECTORY_FILE_NAME}: {error}",
+                "red"
+            )
 
-        deltas = _heart_curve_points(scale_mm)
+            return
 
-        self.heart_points = [
-            (cx, cy + dy, cz + dz)
-            for dy, dz in deltas
-        ]
+        if not points:
 
-        self.heart_index = 0
-        self.heart_running = True
-        self.heart_interval_ms = interval_ms
+            set_status(
+                f"Error: {TRAJECTORY_FILE_NAME} no tiene puntos.",
+                "red"
+            )
 
-        self.set_ik_status(
-            f"Dibujando corazón... (0/{len(self.heart_points)})",
+            return
+
+        # Antes de mover nada se verifica que todos los puntos
+        # tengan solución, para no quedar a mitad de camino.
+
+        unreachable = self._first_unreachable_point(key, points)
+
+        if unreachable is not None:
+
+            line_number, x, y, z = unreachable
+
+            set_status(
+                f"✗ Línea {line_number}: ({x:.1f}, {y:.1f}, "
+                f"{z:.1f}) no alcanzable. No se ejecutó.",
+                "red"
+            )
+
+            return
+
+        # Solo una trayectoria a la vez: se cancela cualquiera
+        # que siga pendiente (en esta u otra pestaña).
+
+        for other_key in self.trajectories:
+            self.stop_file_trajectory(other_key)
+
+        traj['points'] = [(x, y, z) for _, x, y, z in points]
+        traj['index'] = 0
+        traj['running'] = True
+        traj['interval_ms'] = interval_ms
+
+        set_status(
+            f"Siguiendo trayectoria... (0/{len(traj['points'])})",
             "blue"
         )
 
-        self._heart_step()
+        self._file_trajectory_step(key)
 
 
     # ========================================================
-    # TRAYECTORIA "CORAZÓN" - UN PASO
+    # TRAYECTORIA DESDE ARCHIVO - UN PASO
     # (encadenado solo, vía root.after; no bloquea la GUI)
     # ========================================================
 
-    def _heart_step(self):
+    def _file_trajectory_step(self, key):
 
-        if not self.heart_running:
+        traj = self.trajectories[key]
+
+        if not traj['running']:
             return
 
-        if self.heart_index >= len(self.heart_points):
+        if traj['index'] >= len(traj['points']):
 
-            self.heart_running = False
+            traj['running'] = False
 
-            self.set_ik_status(
-                "✓ Corazón completo.",
+            traj['set_status'](
+                "✓ Trayectoria completa.",
                 "green"
             )
 
             return
 
-        x, y, z = self.heart_points[self.heart_index]
+        x, y, z = traj['points'][traj['index']]
 
-        self.ik_entries['X'].delete(0, tk.END)
-        self.ik_entries['X'].insert(0, f"{x:.2f}")
+        entries = traj['entries']
 
-        self.ik_entries['Y'].delete(0, tk.END)
-        self.ik_entries['Y'].insert(0, f"{y:.2f}")
+        entries['X'].delete(0, tk.END)
+        entries['X'].insert(0, f"{x:.2f}")
 
-        self.ik_entries['Z'].delete(0, tk.END)
-        self.ik_entries['Z'].insert(0, f"{z:.2f}")
+        entries['Y'].delete(0, tk.END)
+        entries['Y'].insert(0, f"{y:.2f}")
 
-        self.send_ik_target()
+        entries['Z'].delete(0, tk.END)
+        entries['Z'].insert(0, f"{z:.2f}")
 
-        self.heart_index += 1
+        traj['send_target']()
 
-        self.set_ik_status(
-            f"Dibujando corazón... "
-            f"({self.heart_index}/{len(self.heart_points)})",
+        traj['index'] += 1
+
+        traj['set_status'](
+            f"Siguiendo trayectoria... "
+            f"({traj['index']}/{len(traj['points'])})",
             "blue"
         )
 
-        self.heart_after_id = self.root.after(
-            self.heart_interval_ms,
-            self._heart_step
+        traj['after_id'] = self.root.after(
+            traj['interval_ms'],
+            lambda: self._file_trajectory_step(key)
         )
 
 
     # ========================================================
-    # TRAYECTORIA "CORAZÓN" - DETENER
+    # TRAYECTORIA DESDE ARCHIVO - PARAR
+    # (el robot se queda en el último punto alcanzado)
     # ========================================================
 
-    def stop_heart_trajectory(self):
+    def stop_file_trajectory(self, key):
 
-        self.heart_running = False
+        traj = self.trajectories[key]
 
-        if self.heart_after_id is not None:
+        was_running = traj['running']
+
+        traj['running'] = False
+
+        if traj['after_id'] is not None:
 
             try:
-                self.root.after_cancel(self.heart_after_id)
+                self.root.after_cancel(traj['after_id'])
             except Exception:
                 pass
 
-            self.heart_after_id = None
+            traj['after_id'] = None
+
+        if was_running:
+
+            traj['set_status'](
+                f"Trayectoria detenida en el punto "
+                f"{traj['index']}/{len(traj['points'])}.",
+                "orange"
+            )
+
+
+    # ========================================================
+    # TRAYECTORIA DESDE ARCHIVO - TRAS UN RESULTADO DE IK
+    #
+    # Se llama desde apply_*_result cuando el punto fue
+    # alcanzable. Si la pestaña está siguiendo una trayectoria,
+    # envía el punto a los motores (si la casilla está marcada)
+    # y devuelve True para que no se pise el mensaje de
+    # progreso con "Movimiento realizado".
+    # ========================================================
+
+    def _on_trajectory_ik_result(self, key):
+
+        traj = self.trajectories.get(key)
+
+        if traj is None or not traj['running']:
+            return False
+
+        if traj['hardware_var'].get():
+            self.apply_to_hardware(lambda *_: None)
+
+        return True
 
 
     # ========================================================
@@ -2223,6 +2397,9 @@ class TeleopNode(Node):
                 x_obj, y_obj, z_obj
             )
             self.add_trail_point(x_obj, y_obj, z_obj)
+
+        if self._on_trajectory_ik_result('alg'):
+            return
 
         self.set_ik_status(
             "✓ Movimiento realizado.",
@@ -2379,6 +2556,9 @@ class TeleopNode(Node):
             )
             self.add_trail_point(x_obj, y_obj, z_obj)
 
+        if self._on_trajectory_ik_result('jacob'):
+            return
+
         self.set_ik_jacob_status(
             "✓ Movimiento realizado.",
             "green"
@@ -2526,6 +2706,9 @@ class TeleopNode(Node):
                 x_obj, y_obj, z_obj
             )
             self.add_trail_point(x_obj, y_obj, z_obj)
+
+        if self._on_trajectory_ik_result('des'):
+            return
 
         self.set_ik_des_status(
             "✓ Movimiento realizado.",
