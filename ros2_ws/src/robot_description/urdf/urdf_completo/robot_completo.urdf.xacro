@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<robot name="robot_completo" xmlns:xacro="http://www.ros.org/wiki/xacro">
+  <!--
+    Wrapper xacro para el robot completo (Pata_Pacial2URDFV6: ambas patas
+    sobre el mismo Base_link). El CAD fue exportado con el eje +Y hacia
+    arriba (las patas cuelgan hacia -Y y se separan sobre Z); esta rotacion
+    de +90 grados en X lo deja vertical en RViz, con +Y del CAD -> +Z del
+    mundo y la pata derecha hacia -Y del mundo, sin cambiar la cinematica
+    ni los ejes de las articulaciones.
+  -->
+  <link name="world" />
+  <joint name="world_to_base" type="fixed">
+    <parent link="world" />
+    <child link="Base_link" />
+    <origin xyz="0 0 0" rpy="1.57079632679 0 0" />
+  </joint>
+
+  <xacro:include filename="$(find robot_description)/urdf/urdf_completo/Pata_Pacial2URDFV6.urdf" />
+</robot>

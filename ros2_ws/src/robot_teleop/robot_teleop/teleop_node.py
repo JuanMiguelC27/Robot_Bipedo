@@ -228,7 +228,7 @@ class TeleopNode(Node):
         # ----------------------------------------------------
 
         self.lower_deg = [
-            -15.0,    # Hip Roll
+            -8.0,    # Hip Roll
             -90.0,    # Hip Pitch
             -90.0     # Knee Pitch
         ]
@@ -241,7 +241,7 @@ class TeleopNode(Node):
 
 
         # ----------------------------------------------------
-        # OFFSETS DE LOS SERVOS
+        # OFFSETS DE LOS SERVOS REVISAR
         # ----------------------------------------------------
 
         self.servo_offset_deg = [

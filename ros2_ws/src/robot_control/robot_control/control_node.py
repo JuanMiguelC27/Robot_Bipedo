@@ -103,7 +103,7 @@ class ControlNode(Node):
         self.declare_parameter(
             'joint_limits_lower',
             [
-                -0.261799,
+                -0.139626,
                 -1.5708,
                 -1.5708
             ]

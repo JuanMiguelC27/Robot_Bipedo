@@ -125,8 +125,8 @@ def generate_launch_description():
     xacro_file = os.path.join(
         pkg_desc,
         'urdf',
-        'urdf_der',
-        'pata_der.urdf.xacro'
+        'urdf_completo',
+        'robot_completo.urdf.xacro'
     )
 
 
@@ -146,7 +146,7 @@ def generate_launch_description():
     #
     # Command ejecuta:
     #
-    #     xacro pata_der.urdf.xacro
+    #     xacro robot_completo.urdf.xacro
     #
     # y genera el contenido del robot_description.
     # ------------------------------------------------------------------
@@ -176,6 +176,46 @@ def generate_launch_description():
                         value_type=str
                     )
             }
+        ],
+
+        # El modelo es el robot completo (ambas piernas), pero
+        # control_node solo publica en /joint_states los joints de
+        # esta pierna. Se leen los estados ya completados por
+        # joint_state_publisher (ver abajo) para que la otra pierna
+        # también tenga TF y se dibuje en RViz.
+        remappings=[
+            ('joint_states', '/completo/joint_states')
+        ]
+    )
+
+
+    # ------------------------------------------------------------------
+    # 1.1. JOINT STATE PUBLISHER (completar la otra pierna)
+    #
+    # Toma /joint_states (los 3 joints de esta pierna, publicados por
+    # control_node) y publica en /completo/joint_states los 6 joints
+    # del robot completo, dejando en 0 los de la pierna que no se
+    # controla.
+    # ------------------------------------------------------------------
+
+    joint_states_completo = Node(
+        package='joint_state_publisher',
+
+        executable='joint_state_publisher',
+
+        name='joint_state_publisher',
+
+        namespace='completo',
+
+        parameters=[
+            {
+                'source_list': ['/joint_states'],
+                'rate': 30
+            }
+        ],
+
+        remappings=[
+            ('robot_description', '/robot_description')
         ]
     )
 
@@ -342,6 +382,7 @@ def generate_launch_description():
 
         # Nodos.
         description,
+        joint_states_completo,
         kinematics,
         control,
         sim,
