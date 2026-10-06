@@ -9,7 +9,7 @@
 #   3. Publicar los comandos mediante ROS 2.
 #   4. Recibir el estado actual de las articulaciones.
 #   5. Calcular la cinemática directa.
-#   6. Mostrar las matrices homogéneas T01, T02, T03 y T04.
+#   6. Mostrar las matrices homogéneas T01, T02, T03, T04 y T05.
 #   7. Mostrar la posición X, Y, Z del extremo de la cadena.
 #
 # La misma GUI se utiliza para ambas piernas.
@@ -76,9 +76,9 @@ from robot_kinematics.kinem_invers_leg_mth_Desacople import (
 # POSICIÓN DE "HOME" PARA LA PESTAÑA DE CINEMÁTICA INVERSA (mm)
 # ------------------------------------------------------------
 
-HOME_X = 709.02
+HOME_X = 850.28
 HOME_Y = 0.0
-HOME_Z = 200.4
+HOME_Z = 306.98
 
 
 # ============================================================
@@ -92,7 +92,8 @@ HOME_Z = 200.4
 #
 # Formato: una línea por punto "x, y, z" en mm (mismo sistema
 # de coordenadas que los campos X, Y, Z de la pestaña). Se
-# aceptan comas o espacios como separador; las líneas vacías y
+# aceptan comas o espacios como separador (y corchetes o paréntesis
+# alrededor de cada punto); las líneas vacías y
 # lo que va después de '#' se ignoran.
 #
 # ============================================================
@@ -127,7 +128,12 @@ def _load_trajectory_file(path):
             if not line:
                 continue
 
-            values = line.replace(',', ' ').split()
+            # Se aceptan también puntos entre corchetes o
+            # paréntesis: "[x, y, z]" o "(x, y, z)".
+            for char in '[](),':
+                line = line.replace(char, ' ')
+
+            values = line.split()
 
             if len(values) != 3:
                 raise ValueError(
@@ -228,7 +234,7 @@ class TeleopNode(Node):
         # ----------------------------------------------------
 
         self.lower_deg = [
-            -8.0,    # Hip Roll
+            0,    # Hip Roll
             -90.0,    # Hip Pitch
             -90.0     # Knee Pitch
         ]
@@ -245,7 +251,7 @@ class TeleopNode(Node):
         # ----------------------------------------------------
 
         self.servo_offset_deg = [
-            180.0,    # Hip Roll
+            0,    # Hip Roll
             135.0,    # Hip Pitch
             135.0     # Knee
         ]
@@ -293,7 +299,7 @@ class TeleopNode(Node):
 
         # MTH seleccionada actualmente.
 
-        self.selected_mth = 'T04'
+        self.selected_mth = 'T05'
 
 
         # ====================================================
@@ -888,7 +894,8 @@ class TeleopNode(Node):
                 'T01',
                 'T02',
                 'T03',
-                'T04'
+                'T04',
+                'T05'
             ],
             state='readonly',
             width=10
@@ -2916,6 +2923,7 @@ class TeleopNode(Node):
         # T02 -> índice 1
         # T03 -> índice 2
         # T04 -> índice 3
+        # T05 -> índice 4
         # ----------------------------------------------------
 
         mth_index = int(

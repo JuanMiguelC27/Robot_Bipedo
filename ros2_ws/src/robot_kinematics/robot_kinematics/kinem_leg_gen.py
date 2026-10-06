@@ -3,6 +3,16 @@ Cinemática directa del robot bípedo.
 
 Implementación manual mediante Denavit-Hartenberg.
 Los ángulos de entrada se manejan en grados.
+
+Tabla DH (con articulación fantasma 1A2 para reorientar
+el eje de cadera roll hacia el plano de la rodilla):
+
+        theta   d    a     alpha
+  0A1    0     L1    L2     90°
+  1A2    q1    0     0     -90°   <- fantasma (reorienta eje)
+  2A3    0     L3    L4     0
+  3A4    q2    0     L5     180°
+  4A5    q3    0     L6     0
 """
 
 import numpy as np
@@ -11,12 +21,14 @@ import numpy as np
 # ----------------------------------------------------------------------
 # Parámetros geométricos
 # ----------------------------------------------------------------------
+#L1, L2, L3, L4, L5, L6 = 14.703, 10.51, 15.995, 9.49, 31.197, 33.831
 
-L1 = 200.4
-L2 = 83.75
-L3 = 118.78
-L4 = 253.2
-L5 = 253.29
+L1 = 14.703
+L2 = 10.51
+L3 = 15.995
+L4 = 9.49
+L5 = 31.197
+L6 = 33.831 
 
 
 # ----------------------------------------------------------------------
@@ -61,7 +73,7 @@ def forward_kinematics_right(q):
         [hip_roll, hip_pitch, knee] en grados
 
     Retorna:
-        T01, T02, T03, T04
+        T01, T02, T03, T04, T05
     """
 
     if len(q) != 3:
@@ -82,24 +94,31 @@ def forward_kinematics_right(q):
         alpha=np.pi / 2
     )
 
-    A12 = dh_matrix(
+    A12 = dh_matrix(          # articulación fantasma (hip_roll)
         q1,
         d=0,
-        a=L3,
+        a=0,
         alpha=-np.pi / 2
     )
 
     A23 = dh_matrix(
+        0,
+        d=L3,
+        a=L4,
+        alpha=0
+    )
+
+    A34 = dh_matrix(          # hip_pitch
         q2,
         d=0,
-        a=L4,
+        a=L5,
         alpha=np.pi
     )
 
-    A34 = dh_matrix(
+    A45 = dh_matrix(          # knee
         q3,
         d=0,
-        a=L5,
+        a=L6,
         alpha=0
     )
 
@@ -111,8 +130,9 @@ def forward_kinematics_right(q):
     T02 = T01 @ A12
     T03 = T02 @ A23
     T04 = T03 @ A34
+    T05 = T04 @ A45
 
-    return T01, T02, T03, T04
+    return T01, T02, T03, T04, T05
 
 
 # ----------------------------------------------------------------------
@@ -127,7 +147,7 @@ def forward_kinematics_left(q):
         [hip_roll, hip_pitch, knee] en grados
 
     Retorna:
-        T01, T02, T03, T04
+        T01, T02, T03, T04, T05
     """
 
     if len(q) != 3:
@@ -138,7 +158,9 @@ def forward_kinematics_left(q):
     q1, q2, q3 = np.radians(q)
 
     # --------------------------------------------------------------
-    # Transformaciones DH
+    # Transformaciones DH (mismas L3, L4, L5, L6 y mismos alpha que
+    # la pierna derecha; solo se refleja el signo de L1 y el alpha
+    # del tramo cadera, igual que en la versión anterior)
     # --------------------------------------------------------------
 
     A01 = dh_matrix(
@@ -148,24 +170,31 @@ def forward_kinematics_left(q):
         alpha=-np.pi / 2
     )
 
-    A12 = dh_matrix(
+    A12 = dh_matrix(          # articulación fantasma (hip_roll)
         q1,
         d=0,
-        a=L3,
+        a=0,
         alpha=np.pi / 2
     )
 
     A23 = dh_matrix(
+        0,
+        d=L3,
+        a=L4,
+        alpha=0
+    )
+
+    A34 = dh_matrix(          # hip_pitch
         q2,
         d=0,
-        a=L4,
+        a=L5,
         alpha=np.pi
     )
 
-    A34 = dh_matrix(
+    A45 = dh_matrix(          # knee
         q3,
         d=0,
-        a=L5,
+        a=L6,
         alpha=0
     )
 
@@ -177,8 +206,9 @@ def forward_kinematics_left(q):
     T02 = T01 @ A12
     T03 = T02 @ A23
     T04 = T03 @ A34
+    T05 = T04 @ A45
 
-    return T01, T02, T03, T04
+    return T01, T02, T03, T04, T05
 
 
 # ----------------------------------------------------------------------
@@ -192,8 +222,8 @@ def forward_kinematics_biped(q_right, q_left):
     Retorna:
 
         {
-            "right": (T01, T02, T03, T04),
-            "left":  (T01, T02, T03, T04)
+            "right": (T01, T02, T03, T04, T05),
+            "left":  (T01, T02, T03, T04, T05)
         }
     """
 

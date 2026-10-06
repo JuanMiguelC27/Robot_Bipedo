@@ -2,29 +2,23 @@
 Cinemática inversa de la pata del robot bípedo.
 
 Implementación por matriz final MTH (roll-pitch-pitch con offset DH).
-Mismos parámetros geométricos y convención DH que
-kinem_invers_leg_jacob.py y kinem_invers_leg_mth_Desacople.py.
+Modelo nuevo: con articulación fantasma (1A2) y eslabón L6.
 
 Este método no recibe un punto (x, y, z): recibe la matriz de
 transformación homogénea T deseada (posición + orientación), porque
 despeja los ángulos leyendo celdas puntuales de esa matriz. Como la
 pata tiene 3 GDL, la orientación no es libre: es consecuencia de
-q1, q2, q3, igual que la posición. Por eso se usa como VERIFICACIÓN
-de los otros métodos (algebraico, Jacobiano, desacople): se arma T
-a partir del q que esos métodos ya calcularon, y se comprueba que el
-método matricial recupera esos mismos ángulos (ver verificar_con_mth).
+q1, q2, q3, igual que la posición.
 """
 
 import numpy as np
 
-L1 = 200.4
-L2 = 83.75
-L3 = 118.78
-L4 = 253.2
-L5 = 253.29
+L1, L2, L3, L4, L5, L6 = 14.703, 10.51, 15.995, 9.49, 31.197, 33.831 
+
+q1_deg, q2_deg, q3_deg = 45, 0, 0   # ángulos de prueba, para armar Tdes
 
 # Límites articulares [°]
-q1_min, q1_max = -160, 70
+q1_min, q1_max = 0, 90
 q2_min, q2_max = -115, 115
 q3_min, q3_max = -85, 65
 
@@ -39,50 +33,44 @@ def dh_matrix(theta, d, a, alpha):
         [0,   0,      0,     1   ]])
 
 
-def params_dh(q1, q2, q3, L1=L1, L2=L2, L3=L3, L4=L4, L5=L5):
-    return [(0,  L1, L2,  np.pi/2),
-            (q1, 0,  L3, -np.pi/2),
-            (q2, 0,  L4,  np.pi),
-            (q3, 0,  L5,  0)]
+def fk_T(q1, q2, q3, L1, L2, L3, L4, L5, L6):
+    A01 = dh_matrix(0,  d=L1, a=L2, alpha=np.pi/2)
+    A12 = dh_matrix(q1, d=0,  a=0,  alpha=-np.pi/2)   # fantasma
+    A23 = dh_matrix(0,  d=L3, a=L4, alpha=0)
+    A34 = dh_matrix(q2, d=0,  a=L5, alpha=np.pi)
+    A45 = dh_matrix(q3, d=0,  a=L6, alpha=0)
+    return A01 @ A12 @ A23 @ A34 @ A45                 # = 0A5
 
 
-def fk_T(q1, q2, q3, L1=L1, L2=L2, L3=L3, L4=L4, L5=L5):
-    T = np.eye(4)
-    for th, d, a, al in params_dh(q1, q2, q3, L1, L2, L3, L4, L5):
-        T = T @ dh_matrix(th, d, a, al)
-    return T                                   # = 0A4
-
-
-def cinematica_inversa_pata_mth(T, L1=L1, L2=L2, L3=L3, L4=L4, L5=L5):
+def cinematica_inversa_pata_mth(T, L1, L2, L3, L4, L5, L6):
     """
-    Calcula los ángulos articulares q1, q2, q3 [rad] que producen la
-    matriz de transformación homogénea T, leyendo directamente sus
-    celdas (en vez de resolver un triángulo geométrico).
+    Calcula q1, q2, q3 [rad] leyendo directamente las celdas de T,
+    en vez de resolver un triángulo geométrico.
 
-    Retorna (q1, q2, q3, alcanzable). alcanzable es False si T no es
-    realizable con los 3 GDL de la pata (fk_T(q) no reproduce T).
+    Retorna (q1, q2, q3, alcanzable).
     """
-    nx, ny = T[0, 0], T[1, 0]
+    nx, ny, nz = T[0, 0], T[1, 0], T[2, 0]
     oy = T[1, 1]
     ax, az = T[0, 2], T[2, 2]
     px, py, pz = T[0, 3], T[1, 3], T[2, 3]
 
     q1 = np.arctan2(ax, -az)
-    th = np.arctan2(ny, -oy)                   # th = q2 - q3
-    r  = (px - L2)*np.cos(q1) + (pz - L1)*np.sin(q1)
-    s2 = (py - L5*ny) / L4
-    c2 = (r - L3 + L5*oy) / L4
+    c1, s1 = np.cos(q1), np.sin(q1)
+
+    s2 = (py - L6*ny) / L5
+    c2 = (c1*(px - L2) + s1*(pz - L1) - L4 - L6*(c1*nx + s1*nz)) / L5
     q2 = np.arctan2(s2, c2)
-    q3 = q2 - th
+
+    q23 = np.arctan2(ny, -oy)                  # q2 - q3
+    q3 = q2 - q23
     q3 = np.arctan2(np.sin(q3), np.cos(q3))    # a (-180°, 180°]
 
-    # Validar: la T debe ser realizable con 3 GDL
-    alcanzable = np.max(np.abs(fk_T(q1, q2, q3, L1, L2, L3, L4, L5) - T)) < 1e-6
+    alcanzable = np.max(np.abs(fk_T(q1, q2, q3, L1, L2, L3, L4, L5, L6) - T)) < 1e-6
     return q1, q2, q3, alcanzable
 
 
 def verificar_con_mth(q1, q2, q3, x_obj=None, y_obj=None, z_obj=None,
-                       L1=L1, L2=L2, L3=L3, L4=L4, L5=L5, tol=1e-6):
+                       L1=L1, L2=L2, L3=L3, L4=L4, L5=L5, L6=L6, tol=1e-6):
     """
     Verifica, con el método de la matriz de transformación homogénea,
     la solución (q1, q2, q3) [rad] obtenida por otro método de
@@ -99,13 +87,13 @@ def verificar_con_mth(q1, q2, q3, x_obj=None, y_obj=None, z_obj=None,
         T         -> matriz Tdes (4x4)
         q1r/q2r/q3r -> ángulos [rad] recuperados por el método MTH
         q_error   -> error angular máximo [rad] entre q original y recuperado
-        pos_error -> error de posición [mm] entre Tdes y (x_obj,y_obj,z_obj),
+        pos_error -> error de posición entre Tdes y (x_obj,y_obj,z_obj),
                      o None si no se dio el objetivo
         ok        -> True si fue alcanzable y q_error < tol
     """
-    Tdes = fk_T(q1, q2, q3, L1, L2, L3, L4, L5)
+    Tdes = fk_T(q1, q2, q3, L1, L2, L3, L4, L5, L6)
     q1r, q2r, q3r, alcanzable = cinematica_inversa_pata_mth(
-        Tdes, L1, L2, L3, L4, L5)
+        Tdes, L1, L2, L3, L4, L5, L6)
 
     if not alcanzable:
         return {
@@ -140,13 +128,10 @@ def verificar_con_mth(q1, q2, q3, x_obj=None, y_obj=None, z_obj=None,
 
 
 if __name__ == "__main__":
-    # Ángulos deseados [°], de prueba
-    q1_deg, q2_deg, q3_deg = 20, 40, 30
-
     qd = np.radians([q1_deg, q2_deg, q3_deg])
-    Tdes = fk_T(*qd)
+    Tdes = fk_T(*qd, L1, L2, L3, L4, L5, L6)
 
-    q1, q2, q3, alcanzable = cinematica_inversa_pata_mth(Tdes)
+    q1, q2, q3, alcanzable = cinematica_inversa_pata_mth(Tdes, L1, L2, L3, L4, L5, L6)
 
     print(f"{'='*50}")
     print(f"q deseados: q1 = {q1_deg}°  q2 = {q2_deg}°  q3 = {q3_deg}°")
@@ -158,4 +143,9 @@ if __name__ == "__main__":
     else:
         q1d, q2d, q3d = np.degrees([q1, q2, q3])
         print(f"q1 = {q1d:.2f}°  q2 = {q2d:.2f}°  q3 = {q3d:.2f}°")
-        print("error T:", np.max(np.abs(fk_T(q1, q2, q3) - Tdes)))
+        print("error T:", np.max(np.abs(fk_T(q1, q2, q3, L1, L2, L3, L4, L5, L6) - Tdes)))
+        for nombre, v, mn, mx in (("q1", q1d, q1_min, q1_max),
+                                  ("q2", q2d, q2_min, q2_max),
+                                  ("q3", q3d, q3_min, q3_max)):
+            if not mn <= v <= mx:
+                print(f"Advertencia: {nombre} fuera de rango [{mn}°, {mx}°]")
