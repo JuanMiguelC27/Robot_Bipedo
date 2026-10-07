@@ -51,15 +51,16 @@ from tkinter import ttk
 # IMPORTACIÓN DE CINEMÁTICA
 # ------------------------------------------------------------
 
-from robot_kinematics.kinem_leg_gen import (
+from robot_kinematics.cinematica_directa_der_izq import (
     forward_kinematics_right,
     forward_kinematics_left,
-    get_position
+    get_position,
+    L1, L2, L3, L4, L5, L6
 )
 
-from robot_kinematics.kinem_invers_leg_mth import verificar_con_mth
+from robot_kinematics.kinem_invers_leg_mth_izq import verificar_con_mth
 
-from robot_kinematics.kinem_invers_leg_algebraico import (
+from robot_kinematics.kinem_invers_leg_algebraico_izq import (
     cinematica_inversa_pata_alg
 )
 
@@ -68,7 +69,7 @@ from robot_kinematics.kinem_invers_leg_jacob import (
 )
 
 from robot_kinematics.kinem_invers_leg_mth_desacople_izq import (
-    cinematica_inversa_pata_des
+    cinematica_inversa_pata_des_xyz
 )
 
 from robot_kinematics.kinem_invers_leg_Geometrico_izq import (
@@ -476,7 +477,7 @@ class TeleopNode(Node):
         #
         # No usa tópicos: es un cálculo cerrado (sin iteraciones)
         # que se llama directamente desde la GUI, igual que ya se
-        # hace con la cinemática directa de kinem_leg_gen. Guarda
+        # hace con la cinemática directa de cinematica_directa_der_izq. Guarda
         # el último objetivo (x, y, z) pedido en cada pestaña de
         # IK para poder comparar contra la posición que realmente
         # produce la pose calculada.
@@ -2286,11 +2287,15 @@ class TeleopNode(Node):
                     x, y, z, *seed_deg
                 )
             elif key == 'des':
-                q1, q2, q3, ok = cinematica_inversa_pata_des(x, y, z)
+                q1, q2, q3, ok = cinematica_inversa_pata_des_xyz(x, y, z)
             elif key == 'geom':
-                q1, q2, q3, ok = cinematica_inversa_pata_geom(x, y, z)
+                q1, q2, q3, ok = cinematica_inversa_pata_geom(
+                    x, y, z, L1, L2, L3, L4, L5, L6
+                )
             else:
-                q1, q2, q3, ok = cinematica_inversa_pata_alg(x, y, z)
+                q1, q2, q3, ok = cinematica_inversa_pata_alg(
+                    x, y, z, L1, L2, L3, L4, L5, L6
+                )
 
             if not ok:
                 return line_number, x, y, z
@@ -2532,22 +2537,23 @@ class TeleopNode(Node):
 
         # ----------------------------------------------------
         # Los puntos están en el marco base de la DH
-        # (kinem_leg_gen), que no coincide con Base_link:
+        # (cinematica_directa_der_izq). En el URDF V9 el
+        # Base_link tiene los mismos ejes que esa base:
         #
-        #   X DH (largo de la pierna) -> -Y Base_link
-        #   Y DH (adelante/atrás)     -> +X Base_link
-        #   Z DH (lateral)            -> +Z Base_link
+        #   X (largo de la pierna, hacia abajo)
+        #   Y (adelante/atrás)
+        #   Z (lateral)
         #
-        # Es una rotación de -90° en Z más un desplazamiento
-        # del origen (medido contra el URDF, en metros). Se
-        # aplica con la pose del Marker, así los puntos
-        # quedan tal cual vienen de la cinemática.
+        # así que no hay rotación, solo un desplazamiento del
+        # origen (medido contra el URDF, en metros). Se aplica
+        # con la pose del Marker, así los puntos quedan tal
+        # cual vienen de la cinemática.
         # ----------------------------------------------------
 
         if self.leg_side == 'left':
-            offset = (0.0950, -0.0071, 0.0050)
+            offset = (0.0086, 0.0949, 0.0015)
         else:
-            offset = (0.0816, -0.0070, -0.0056)
+            offset = (0.0083, 0.0816, -0.0030)
 
         marker.pose.position.x = offset[0]
         marker.pose.position.y = offset[1]
@@ -2555,8 +2561,8 @@ class TeleopNode(Node):
 
         marker.pose.orientation.x = 0.0
         marker.pose.orientation.y = 0.0
-        marker.pose.orientation.z = -math.sqrt(0.5)
-        marker.pose.orientation.w = math.sqrt(0.5)
+        marker.pose.orientation.z = 0.0
+        marker.pose.orientation.w = 1.0
 
         marker.scale.x = 0.005
 

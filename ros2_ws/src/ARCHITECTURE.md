@@ -18,10 +18,20 @@ robot_interfaces
   - srv/ y action/: carpetas creadas, vacías por ahora (.gitme adentro).
 
 robot_description
-  Define la forma física del robot en URDF/Xacro. Ya no es una sola pata
-  genérica: hay un URDF real por lado (exportado de SolidWorks), cada uno
-  con su wrapper xacro que agrega un frame "world" fijo (rotado 90° para
-  verse vertical en RViz) y con sus propias mallas:
+  Define la forma física del robot en URDF/Xacro.
+  Modelo que usan RViz y los bringup (izq y der):
+    urdf/urdf_completo/robot_completo.urdf.xacro -> Pata_Pacial2URDFV9.urdf
+      Las dos patas sobre el mismo Base_link, mallas en meshes/meshes_completo.
+      El Base_link de V9 tiene los mismos ejes que la base {0} de la
+      cinemática: +X a lo largo de la pierna hacia abajo, +Y al frente,
+      +Z lateral (pata izquierda en -Z). Sus articulaciones siguen la
+      convención del robot (+Hip Pitch -> pierna adelante, +Knee Pitch ->
+      pierna atrás), así que control_node publica los ángulos sin invertir
+      signos. El wrapper agrega el frame "world" rotado (rpy 0, 90°, -90°)
+      para verse vertical en RViz.
+      Límites V9: Hip_Roll [0, 1.5708], Hip_Pitch y Knee [-1.5708, 1.5708].
+  URDF anteriores por lado (solo los usan los launch gazebo_der/gazebo_izq),
+  cada uno con su wrapper xacro y sus propias mallas:
     urdf/urdf_der/pata_der.urdf.xacro -> Pata_Der_Robo_Parcial_URDF_V2.2.urdf
       Links: Base_link, Right_Hip_Roll_Link, Right_Hip_Pitch_Link,
       Right_Knee_Link. Joints: Right_Hip_Roll_Joint, Right_Hip_Pitch_Joint,
@@ -39,9 +49,18 @@ robot_description
 
 robot_kinematics
   Nodo kinematics_node: recibe /robot/command y publica /robot/joint_targets.
-  Usa kinem_leg_gen.py para calcular la cinemática directa (forward kinematics)
-  con parámetros DH. Hoy reenvía; aquí va luego la cinemática inversa,
-  trayectorias y coordinación de patas.
+  Hoy reenvía; aquí va luego la cinemática inversa, trayectorias y
+  coordinación de patas.
+  Módulos de cinemática (por ahora solo la pierna IZQUIERDA está corregida;
+  todos usan la misma tabla DH y la convención del URDF V9: +q2 pierna
+  adelante, +q3 pierna atrás; rama de rodilla por defecto: q3 > 0):
+    cinematica_directa_der_izq.py          -> directa (ambas piernas, grados)
+    kinem_invers_leg_algebraico_izq.py     -> inversa algebraica  (ik_node)
+    kinem_invers_leg_Geometrico_izq.py     -> inversa geométrica  (ik_geom_node)
+    kinem_invers_leg_mth_desacople_izq.py  -> inversa por desacople (ik_des_node)
+    kinem_invers_leg_jacob.py              -> inversa por Jacobiano (ik_jacob_node)
+    kinem_invers_leg_mth_izq.py            -> inversa por MTH; la interfaz la usa
+                                              para verificar las demás soluciones
 
 robot_control
   Nodo control_node: recibe /robot/joint_targets.
@@ -234,8 +253,10 @@ que ros2 topic echo /joint_states trae position con datos.
 - num_joints es parámetro: 3 para una pata. Cuando exista un URDF combinado
   de las dos patas (torso/pelvis común) esto sube a 6; hoy no existe ese
   URDF combinado, cada pata es un modelo independiente.
-- kinem_leg_gen.py implementa la cinemática directa con Denavit-Hartenberg.
-  Funciones: forward_kinematics(q1, q2, q3) y end_effector_position(q1, q2, q3).
+- cinematica_directa_der_izq.py implementa la cinemática directa con
+  Denavit-Hartenberg. Funciones: forward_kinematics_right(q),
+  forward_kinematics_left(q) (q en grados, devuelven T01..T05),
+  get_position(T), get_rotation(T) y format_matrix(T).
 - Cada URDF real (SolidWorks) se incluye vía un wrapper xacro
   (pata_der.urdf.xacro / pata_izq.urdf.xacro) para compatibilidad con ROS2 y
   para agregar el frame "world" que usa RViz como Fixed Frame.

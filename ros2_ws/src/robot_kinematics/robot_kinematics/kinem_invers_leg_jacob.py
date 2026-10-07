@@ -6,7 +6,7 @@ Q1 = cadera-roll, Q2 = cadera-pitch, Q3 = rodilla-pitch
 Marco {0}: origen en el centro de la pelvis, X vertical hacia ABAJO,
 Z lateral hacia la cadera, Y = Z x X (anteroposterior).
 
-A diferencia de kinem_invers_leg_algebraico.py (solución cerrada),
+A diferencia de kinem_invers_leg_algebraico_izq.py (solución cerrada),
 este método es ITERATIVO: necesita una postura inicial (semilla)
 q1, q2, q3 desde donde arrancar a converger hacia el objetivo.
 """
@@ -14,7 +14,7 @@ q1, q2, q3 desde donde arrancar a converger hacia el objetivo.
 import numpy as np
 
 # ----------------------------------------------------------------------
-# Parámetros geométricos [mm] (mismos que kinem_leg_gen.py)
+# Parámetros geométricos [mm] (mismos que cinematica_directa_der_izq.py)
 # ----------------------------------------------------------------------
 L1, L2, L3, L4, L5, L6 = 147.03, 105.1, 159.95, 94.9, 311.97, 338.31
 
@@ -48,7 +48,8 @@ def dh_matrix(theta, d, a, alpha):
 
 # ----------------------------------------------------------------------
 # Cinemática directa: p = última columna de 0A5
-# (misma tabla DH que forward_kinematics_left en kinem_leg_gen.py)
+# (misma tabla DH que forward_kinematics_left en
+#  cinematica_directa_der_izq.py)
 # ----------------------------------------------------------------------
 def cinematica_directa(q1, q2, q3, L1=L1, L2=L2, L3=L3, L4=L4, L5=L5, L6=L6):
     A01 = dh_matrix(0,  d=-L1, a=L2, alpha=-np.pi/2)

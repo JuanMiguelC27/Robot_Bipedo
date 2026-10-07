@@ -19,7 +19,7 @@ from geometry_msgs.msg import Point
 from robot_interfaces.msg import IKResult
 
 from robot_kinematics.kinem_invers_leg_mth_desacople_izq import (
-    cinematica_inversa_pata_des,
+    cinematica_inversa_pata_des_xyz,
     joint_limit_warnings,
 )
 
@@ -47,7 +47,7 @@ class IKDesNode(Node):
             f'ik_des_node listo (pierna {self.leg_side})')
 
     def on_target(self, msg):
-        q1, q2, q3, alcanzable = cinematica_inversa_pata_des(
+        q1, q2, q3, alcanzable = cinematica_inversa_pata_des_xyz(
             msg.x, msg.y, msg.z)
 
         result = IKResult()

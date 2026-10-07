@@ -18,9 +18,10 @@ from rclpy.node import Node
 from geometry_msgs.msg import Point
 from robot_interfaces.msg import IKResult
 
-from robot_kinematics.kinem_invers_leg_algebraico import (
+from robot_kinematics.kinem_invers_leg_algebraico_izq import (
     cinematica_inversa_pata_alg,
     joint_limit_warnings,
+    L1, L2, L3, L4, L5, L6,
 )
 
 
@@ -48,7 +49,7 @@ class IKNode(Node):
 
     def on_target(self, msg):
         q1, q2, q3, alcanzable = cinematica_inversa_pata_alg(
-            msg.x, msg.y, msg.z)
+            msg.x, msg.y, msg.z, L1, L2, L3, L4, L5, L6)
 
         result = IKResult()
         result.reachable = bool(alcanzable)

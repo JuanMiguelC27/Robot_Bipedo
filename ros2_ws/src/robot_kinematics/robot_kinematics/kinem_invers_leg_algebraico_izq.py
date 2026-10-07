@@ -2,32 +2,33 @@
 Cinemática inversa
 Implementación algebraica (roll-pitch-pitch con offset DH).
 Modelo nuevo: con articulación fantasma (1A2) y eslabón L6.
-Pierna IZQUIERDA.
+Pierna IZQUIERDA (misma tabla y convención que forward_kinematics_left en
+cinematica_directa_der_izq.py: alpha=+90° en 1A2, d=-L3 en 2A3;
++q2 lleva la pierna adelante, +q3 la lleva atrás).
 """
 
 import numpy as np
 
 L1, L2, L3, L4, L5, L6 = 147.03, 105.1, 159.95, 94.9, 311.97, 338.31
 
-x, y, z = 265.05, 0, -892.21   # objetivo de prueba
+x, y, z = 850.28, 0.0, -306.98   # objetivo de prueba (q1=q2=q3=0)
 
 # Límites articulares [°]
-q1_min, q1_max = 0, 90
-q2_min, q2_max = -90 , 90
-q3_min, q3_max = -90, 90
+q1_min, q1_max = -160, 90
+q2_min, q2_max = -115, 115
+q3_min, q3_max = -85, 65
 
-def cinematica_inversa_pata_alg(x, y, z,
-                                L1=L1, L2=L2, L3=L3, L4=L4, L5=L5, L6=L6,
-                                codo="arriba"):
+def cinematica_inversa_pata_alg(x, y, z, L1, L2, L3, L4, L5, L6, codo="arriba"):
     xp = x - L2
-    zp = z + L1                                   # <- z + L1, no z - L1
+    zp = z + L1                                    # <- z + L1, no z - L1
+    rho2 = xp**2 + zp**2
 
-    disc = xp**2 + zp**2 - L3**2
+    disc = rho2 - L3**2
     if disc < 0:
         return None, None, None, False
     r = np.sqrt(disc)
 
-    q1 = -np.arctan2(L3, r) - np.arctan2(zp, xp)   # <- L3 reflejado (d = -L3)
+    q1 = np.arctan2(-zp, xp) - np.arctan2(L3, r)    # <- -zp, no zp
 
     u = r - L4
     v = y
@@ -49,7 +50,7 @@ def cinematica_inversa_pata_alg(x, y, z,
 
     return q1, q2, q3, True
 
-def joint_limit_warnings(q1_deg, q2_deg, q3_deg):
+def joint_limit_warnings(q1_deg, q2_deg, q3_deg, tol=1e-6):
     """
     Devuelve una lista de textos de advertencia para los ángulos
     (en grados) que queden fuera de los límites articulares
@@ -59,7 +60,7 @@ def joint_limit_warnings(q1_deg, q2_deg, q3_deg):
     for nombre, v, mn, mx in (("q1", q1_deg, q1_min, q1_max),
                               ("q2", q2_deg, q2_min, q2_max),
                               ("q3", q3_deg, q3_min, q3_max)):
-        if not mn <= v <= mx:
+        if not (mn - tol) <= v <= (mx + tol):
             warnings.append(f"{nombre} fuera de rango [{mn}°, {mx}°]")
     return warnings
 
@@ -76,5 +77,8 @@ if __name__ == "__main__":
     else:
         q1d, q2d, q3d = np.degrees([q1, q2, q3])
         print(f"q1 = {q1d:.2f}°  q2 = {q2d:.2f}°  q3 = {q3d:.2f}°")
-        for aviso in joint_limit_warnings(q1d, q2d, q3d):
-            print(f"Advertencia: {aviso}")
+        for nombre, v, mn, mx in (("q1", q1d, q1_min, q1_max),
+                                  ("q2", q2d, q2_min, q2_max),
+                                  ("q3", q3d, q3_min, q3_max)):
+            if not mn <= v <= mx:
+                print(f"Advertencia: {nombre} fuera de rango [{mn}°, {mx}°]")

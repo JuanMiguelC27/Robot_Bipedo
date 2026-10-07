@@ -7,12 +7,29 @@ Los ángulos de entrada se manejan en grados.
 Tabla DH (con articulación fantasma 1A2 para reorientar
 el eje de cadera roll hacia el plano de la rodilla):
 
+  Pierna DERECHA:
         theta   d    a     alpha
   0A1    0     L1    L2     90°
   1A2    q1    0     0     -90°   <- fantasma (reorienta eje)
   2A3    0     L3    L4     0
   3A4    q2    0     L5     180°
   4A5    q3    0     L6     0
+
+  Pierna IZQUIERDA (la misma tabla de las cinemáticas inversas *_izq):
+        theta   d    a     alpha
+  0A1    0    -L1    L2    -90°
+  1A2    q1    0     0      90°   <- fantasma (reorienta eje)
+  2A3    0    -L3    L4     0
+  3A4    q2    0     L5     180°
+  4A5    q3    0     L6     0
+
+  Convención de ángulos (la misma del URDF V9, cuyo Base_link
+  coincide con la base {0}: +X abajo, +Y al FRENTE, +Z lateral):
+      +q2 (cadera pitch) -> la pierna va hacia ADELANTE (+Y)
+      +q3 (rodilla)      -> la pierna va hacia ATRÁS   (-Y)
+  Por eso en la izquierda 1A2 lleva alpha=+90° y 2A3 d=-L3: con
+  alpha=-90° y d=+L3 la posición sale reflejada en Y y los
+  sentidos de q2 y q3 quedan al revés.
 """
 
 import numpy as np
@@ -158,10 +175,9 @@ def forward_kinematics_left(q):
     q1, q2, q3 = np.radians(q)
 
     # --------------------------------------------------------------
-    # Transformaciones DH (mismas L4, L5, L6 y mismos alpha que la
-    # pierna derecha). Es el espejo de la derecha respecto al plano
-    # z = 0: se reflejan los desplazamientos laterales L1 y L3 y el
-    # alpha del tramo cadera.
+    # Transformaciones DH (se refleja el signo de L1, L3 y de los
+    # alpha de 0A1 y 1A2 respecto a la pierna derecha; ver la
+    # convención de ángulos al inicio del archivo)
     # --------------------------------------------------------------
 
     A01 = dh_matrix(

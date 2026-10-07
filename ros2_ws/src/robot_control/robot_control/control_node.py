@@ -250,8 +250,7 @@ class ControlNode(Node):
         )
 
         self.get_logger().info(
-            'Knee Pitch: signo invertido antes de publicar '
-            'a RViz y actuadores'
+            'Ángulos publicados sin inversión de signos (URDF V9)'
         )
 
 
@@ -268,11 +267,12 @@ class ControlNode(Node):
 
         En particular:
 
-            Knee Pitch positivo = flexionar/recoger rodilla.
+            Hip Pitch positivo  = la pierna va hacia adelante.
+            Knee Pitch positivo = la pierna va hacia atrás
+                                  (flexionar/recoger rodilla).
 
-        La inversión necesaria para el sentido físico del
-        actuador y del URDF se realiza posteriormente en
-        control_loop().
+        El URDF V9 usa esa misma convención, así que control_loop()
+        publica los ángulos sin invertir signos.
         """
 
         self.target = msg
@@ -511,13 +511,6 @@ class ControlNode(Node):
         # ====================================================
         # GUARDAR ÚLTIMA POSICIÓN
         # ====================================================
-        #
-        # Guardamos la posición antes de invertir el Knee Pitch.
-        #
-        # Esto permite que internamente el control siga trabajando
-        # con la convención original del robot.
-        #
-        # ====================================================
 
         self._last_clamped = list(
             state.position
@@ -525,59 +518,28 @@ class ControlNode(Node):
 
 
         # ====================================================
-        # CAMBIO: INVERSIÓN DEL KNEE PITCH
+        # SIN INVERSIÓN DE SIGNOS
         # ====================================================
         #
-        # El problema detectado es que el sentido positivo de
-        # Left_Knee_Joint en el URDF utilizado por
-        # robot_state_publisher/RViz es contrario al sentido
-        # que definimos para el Knee Pitch del robot.
+        # Con el URDF V9 (urdf_completo/Pata_Pacial2URDFV9.urdf)
+        # los ejes de las articulaciones ya siguen la convención
+        # de ángulos del robot y de la cinemática
+        # (cinematica_directa_der_izq.py):
         #
-        # Convención de trabajo:
+        #       +Hip Pitch  -> la pierna va hacia ADELANTE
+        #       +Knee Pitch -> la pierna va hacia ATRÁS
         #
-        #       +Knee Pitch
-        #             ↓
-        #       rodilla se recoge
-        #
-        # Para conseguir ese mismo movimiento en RViz y en el
-        # actuador, invertimos únicamente el índice 2:
-        #
-        #       0 -> Hip Roll
-        #       1 -> Hip Pitch
-        #       2 -> Knee Pitch
-        #
-        # Por ejemplo:
-        #
-        #       +30° = +0.5236 rad
-        #
-        # pasa a:
-        #
-        #       -30° = -0.5236 rad
-        #
-        # IMPORTANTE:
-        #
-        # La GUI y la lógica interna del control siguen usando
-        # +30° como el valor solicitado.
-        #
-        # La inversión ocurre solamente al publicar el resultado.
+        # Por eso los ángulos se publican tal cual. (Con los
+        # URDF anteriores había que invertir el Knee Pitch).
         #
         # ====================================================
-
-        if self.n >= 3:
-
-            state.position[2] = -state.position[2]
 
 
         # ====================================================
         # PUBLICAR ESTADO
         # ====================================================
         #
-        # Este valor ya contiene la inversión del Knee Pitch.
-        #
         # /joint_states -> robot_state_publisher -> RViz
-        #
-        # Por lo tanto RViz recibe el signo necesario para que
-        # el movimiento visual coincida con nuestra convención.
         #
         # ====================================================
 
@@ -600,8 +562,6 @@ class ControlNode(Node):
         # /joint_group_position_controller/commands.
         #
         # Por eso NO es necesario modificar sim_bridge.
-        #
-        # El Knee Pitch ya sale con el signo invertido.
         #
         # ====================================================
 
@@ -640,8 +600,8 @@ class ControlNode(Node):
         es utilizado por robot_state_publisher para generar
         los TF que RViz utiliza para visualizar el robot.
 
-        La posición recibida aquí ya contiene la conversión
-        necesaria del Knee Pitch.
+        La posición se publica tal cual (convención del robot,
+        que es la misma del URDF V9).
         """
 
         msg = SensorJointState()

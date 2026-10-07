@@ -3,21 +3,21 @@
      Commit Version: 1.6.0-4-g7f85cfe  Build Version: 1.6.7995.38578
      For more information, please see http://wiki.ros.org/sw_urdf_exporter -->
 <robot
-  name="Pata_Pacial2URDFV6">
+  name="Pata_Pacial2URDFV9">
   <link
     name="Base_link">
     <inertial>
       <origin
-        xyz="-0.018172 -0.89862 -0.0011122"
+        xyz="0.89862 -0.018172 -0.0011122"
         rpy="0 0 0" />
       <mass
         value="30.384" />
       <inertia
-        ixx="1.489"
-        ixy="-4.6363E-05"
-        ixz="-2.8743E-05"
-        iyy="0.80864"
-        iyz="6.5615E-07"
+        ixx="0.80864"
+        ixy="4.6363E-05"
+        ixz="-6.5615E-07"
+        iyy="1.489"
+        iyz="-2.8743E-05"
         izz="2.1249" />
     </inertial>
     <visual>
@@ -88,8 +88,8 @@
     name="Right_Hip_Roll_Joint"
     type="revolute">
     <origin
-      xyz="0.065472 -0.10907 0.14406"
-      rpy="3.1416 -1.5708 0" />
+      xyz="0.10907 0.065472 0.14406"
+      rpy="4.7124 -1.5708 0" />
     <parent
       link="Base_link" />
     <child
@@ -97,7 +97,7 @@
     <axis
       xyz="0 0 -1" />
     <limit
-      lower="-0.34907"
+      lower="0"
       upper="1.5708"
       effort="100"
       velocity="100" />
@@ -222,16 +222,16 @@
     name="Left_Hip_Roll_Link">
     <inertial>
       <origin
-        xyz="-0.018172 -0.89862 -0.0011122"
+        xyz="0.89862 -0.018172 -0.0011122"
         rpy="0 0 0" />
       <mass
         value="30.384" />
       <inertia
-        ixx="1.489"
-        ixy="-4.6363E-05"
-        ixz="-2.8743E-05"
-        iyy="0.80864"
-        iyz="6.5615E-07"
+        ixx="0.80864"
+        ixy="4.6363E-05"
+        ixz="-6.5615E-07"
+        iyy="1.489"
+        iyz="-2.8743E-05"
         izz="2.1249" />
     </inertial>
     <visual>
@@ -262,8 +262,8 @@
     name="Left_Hip_Roll_Joint"
     type="revolute">
     <origin
-      xyz="0.078873 -0.10909 -0.14579"
-      rpy="3.1416 -1.5708 0" />
+      xyz="0.10909 0.078873 -0.14579"
+      rpy="4.7124 -1.5708 0" />
     <parent
       link="Base_link" />
     <child
@@ -271,7 +271,7 @@
     <axis
       xyz="0 0 1" />
     <limit
-      lower="-0.34907"
+      lower="0"
       upper="1.5708"
       effort="100"
       velocity="100" />
@@ -378,7 +378,7 @@
     name="Left_Knee_Joint"
     type="revolute">
     <origin
-      xyz="0 0.313239999999995 -0.000121751528806113"
+      xyz="0 0.31324 -0.00012175"
       rpy="0 0 0" />
     <parent
       link="Left_Hip_Pitch_Link" />
