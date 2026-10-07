@@ -16,11 +16,7 @@ import numpy as np
 # ----------------------------------------------------------------------
 # Parámetros geométricos [mm] (mismos que kinem_leg_gen.py)
 # ----------------------------------------------------------------------
-L1 = 200.4
-L2 = 83.75
-L3 = 118.78
-L4 = 253.2
-L5 = 253.29
+L1, L2, L3, L4, L5, L6 = 147.03, 105.1, 159.95, 94.9, 311.97, 338.31
 
 # Límites articulares [°] (sólo se avisa si la solución se sale)
 q1_min, q1_max = -160, 70
@@ -51,32 +47,35 @@ def dh_matrix(theta, d, a, alpha):
 
 
 # ----------------------------------------------------------------------
-# Cinemática directa: p = última columna de 0A4
+# Cinemática directa: p = última columna de 0A5
+# (misma tabla DH que forward_kinematics_left en kinem_leg_gen.py)
 # ----------------------------------------------------------------------
-def cinematica_directa(q1, q2, q3, L1=L1, L2=L2, L3=L3, L4=L4, L5=L5):
-    A01 = dh_matrix(0,  d=L1, a=L2, alpha=np.pi/2)
-    A12 = dh_matrix(q1, d=0,  a=L3, alpha=-np.pi/2)
-    A23 = dh_matrix(q2, d=0,  a=L4, alpha=np.pi)
-    A34 = dh_matrix(q3, d=0,  a=L5, alpha=0)
-    A04 = A01 @ A12 @ A23 @ A34
-    return A04[:3, 3]                      # [X, Y, Z]
+def cinematica_directa(q1, q2, q3, L1=L1, L2=L2, L3=L3, L4=L4, L5=L5, L6=L6):
+    A01 = dh_matrix(0,  d=-L1, a=L2, alpha=-np.pi/2)
+    A12 = dh_matrix(q1, d=0,   a=0,  alpha=np.pi/2)    # fantasma
+    A23 = dh_matrix(0,  d=-L3, a=L4, alpha=0)
+    A34 = dh_matrix(q2, d=0,   a=L5, alpha=np.pi)
+    A45 = dh_matrix(q3, d=0,   a=L6, alpha=0)
+    A05 = A01 @ A12 @ A23 @ A34 @ A45
+    return A05[:3, 3]                      # [X, Y, Z]
 
 
 # ----------------------------------------------------------------------
 # Jacobiano: derivadas parciales de X, Y, Z respecto a Q1, Q2, Q3
-#   X = L2 + r cos Q1      r = L3 + L4 cos Q2 + L5 cos(Q2 - Q3)
-#   Y = w                  w = L4 sin Q2 + L5 sin(Q2 - Q3)
-#   Z = L1 + r sin Q1      det J = L4 L5 r sin Q3
+#   X = L2 - L3 sin Q1 + r cos Q1      r = L4 + L5 cos Q2 + L6 cos(Q2 - Q3)
+#   Y = w                              w = L5 sin Q2 + L6 sin(Q2 - Q3)
+#   Z = -L1 - L3 cos Q1 - r sin Q1
 # ----------------------------------------------------------------------
-def jacobiano(q1, q2, q3, L3=L3, L4=L4, L5=L5):
+def jacobiano(q1, q2, q3, L3=L3, L4=L4, L5=L5, L6=L6):
     phi = q2 - q3
-    r = L3 + L4*np.cos(q2) + L5*np.cos(phi)
-    w = L4*np.sin(q2) + L5*np.sin(phi)
+    r = L4 + L5*np.cos(q2) + L6*np.cos(phi)
+    w = L5*np.sin(q2) + L6*np.sin(phi)
+    c1, s1 = np.cos(q1), np.sin(q1)
     return np.array([
-        #  ∂/∂Q1          ∂/∂Q2                           ∂/∂Q3
-        [-r*np.sin(q1),  -w*np.cos(q1),                  L5*np.sin(phi)*np.cos(q1)],  # X
-        [ 0,              L4*np.cos(q2) + L5*np.cos(phi), -L5*np.cos(phi)            ],  # Y
-        [ r*np.cos(q1),  -w*np.sin(q1),                  L5*np.sin(phi)*np.sin(q1)],  # Z
+        #  ∂/∂Q1              ∂/∂Q2                           ∂/∂Q3
+        [-L3*c1 - r*s1,      -w*c1,                          L6*np.sin(phi)*c1],  # X
+        [ 0,                  L5*np.cos(q2) + L6*np.cos(phi), -L6*np.cos(phi)  ],  # Y
+        [ L3*s1 - r*c1,       w*s1,                          -L6*np.sin(phi)*s1],  # Z
     ])
 
 
@@ -85,7 +84,7 @@ def jacobiano(q1, q2, q3, L3=L3, L4=L4, L5=L5):
 # ----------------------------------------------------------------------
 def cinematica_inversa_pata_jacob(x, y, z,
                                    q1_seed_deg, q2_seed_deg, q3_seed_deg,
-                                   L1=L1, L2=L2, L3=L3, L4=L4, L5=L5,
+                                   L1=L1, L2=L2, L3=L3, L4=L4, L5=L5, L6=L6,
                                    alfa=ALFA, tol=TOL, max_iter=MAX_ITER,
                                    paso_max=PASO_MAX, lam=LAM, rama=RAMA):
     """
@@ -102,15 +101,15 @@ def cinematica_inversa_pata_jacob(x, y, z,
 
     for _ in range(max_iter + 1):
         q[2] = rama * np.clip(rama*q[2], eps, np.pi - eps)   # misma rama de rodilla
-        e = p_obj - cinematica_directa(*q, L1=L1, L2=L2, L3=L3, L4=L4, L5=L5)
+        e = p_obj - cinematica_directa(*q, L1=L1, L2=L2, L3=L3, L4=L4, L5=L5, L6=L6)
 
         if np.linalg.norm(e) <= tol:
             alcanzable = True
             break
 
-        J = jacobiano(*q, L3=L3, L4=L4, L5=L5)
+        J = jacobiano(*q, L3=L3, L4=L4, L5=L5, L6=L6)
 
-        if abs(np.linalg.det(J)) / (L1+L2+L3+L4+L5)**3 > 1e-4:
+        if abs(np.linalg.det(J)) / (L1+L2+L3+L4+L5+L6)**3 > 1e-4:
             dq = np.linalg.solve(J, e)                                  # ΔQ = J^-1·e
         else:
             dq = J.T @ np.linalg.solve(J @ J.T + lam**2*np.eye(3), e)   # singular: amortiguado

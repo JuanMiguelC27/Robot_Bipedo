@@ -1,9 +1,9 @@
 # ============================================================
-# NODO DE CINEMÁTICA INVERSA (MÉTODO DE DESACOPLE)
+# NODO DE CINEMÁTICA INVERSA (MÉTODO GEOMÉTRICO)
 # ============================================================
 #
-# Recibe un punto objetivo (x, y, z) en /robot/ik_des_target y
-# publica en /robot/ik_des_result:
+# Recibe un punto objetivo (x, y, z) en /robot/ik_geom_target y
+# publica en /robot/ik_geom_result:
 #
 #   - reachable: si el punto es alcanzable geométricamente.
 #   - position:  q1, q2, q3 [rad] para alcanzarlo (si aplica).
@@ -18,16 +18,16 @@ from rclpy.node import Node
 from geometry_msgs.msg import Point
 from robot_interfaces.msg import IKResult
 
-from robot_kinematics.kinem_invers_leg_mth_desacople_izq import (
-    cinematica_inversa_pata_des,
+from robot_kinematics.kinem_invers_leg_Geometrico_izq import (
+    cinematica_inversa_pata_geom,
     joint_limit_warnings,
 )
 
 
-class IKDesNode(Node):
+class IKGeomNode(Node):
 
     def __init__(self):
-        super().__init__('ik_des_node')
+        super().__init__('ik_geom_node')
 
         self.declare_parameter('leg_side', 'left')
         self.leg_side = (
@@ -38,16 +38,16 @@ class IKDesNode(Node):
         )
 
         self.target_sub = self.create_subscription(
-            Point, '/robot/ik_des_target', self.on_target, 10)
+            Point, '/robot/ik_geom_target', self.on_target, 10)
 
         self.result_pub = self.create_publisher(
-            IKResult, '/robot/ik_des_result', 10)
+            IKResult, '/robot/ik_geom_result', 10)
 
         self.get_logger().info(
-            f'ik_des_node listo (pierna {self.leg_side})')
+            f'ik_geom_node listo (pierna {self.leg_side})')
 
     def on_target(self, msg):
-        q1, q2, q3, alcanzable = cinematica_inversa_pata_des(
+        q1, q2, q3, alcanzable = cinematica_inversa_pata_geom(
             msg.x, msg.y, msg.z)
 
         result = IKResult()
@@ -71,7 +71,7 @@ class IKDesNode(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    rclpy.spin(IKDesNode())
+    rclpy.spin(IKGeomNode())
     rclpy.shutdown()
 
 

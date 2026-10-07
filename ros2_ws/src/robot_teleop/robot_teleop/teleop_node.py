@@ -67,8 +67,12 @@ from robot_kinematics.kinem_invers_leg_jacob import (
     cinematica_inversa_pata_jacob
 )
 
-from robot_kinematics.kinem_invers_leg_mth_Desacople import (
+from robot_kinematics.kinem_invers_leg_mth_desacople_izq import (
     cinematica_inversa_pata_des
+)
+
+from robot_kinematics.kinem_invers_leg_Geometrico_izq import (
+    cinematica_inversa_pata_geom
 )
 
 
@@ -374,7 +378,7 @@ class TeleopNode(Node):
 
         # ----------------------------------------------------
         # Trayectorias desde archivo, una por pestaña de IK
-        # ('alg', 'jacob', 'des'). Cada entrada guarda sus
+        # ('alg', 'jacob', 'des', 'geom'). Cada entrada guarda sus
         # widgets (los llena build_trajectory_frame), la lista
         # de puntos (x, y, z) en mm a visitar, el índice del
         # punto actual, si está corriendo, y el id del
@@ -388,7 +392,7 @@ class TeleopNode(Node):
         # RASTRO DEL RECORRIDO (verificación visual en RViz)
         #
         # Cada vez que un objetivo de cinemática inversa es
-        # alcanzable y se aplica (en cualquiera de las 3
+        # alcanzable y se aplica (en cualquiera de las 4
         # pestañas de IK), se agrega el punto a esta lista y se
         # publica como un Marker tipo LINE_STRIP, en el mismo
         # frame que usa la cinemática (Base_link), para poder
@@ -447,6 +451,27 @@ class TeleopNode(Node):
 
 
         # ====================================================
+        # CINEMÁTICA INVERSA - MÉTODO GEOMÉTRICO
+        # (vía ik_geom_node, por tópicos)
+        # ====================================================
+
+        self.ik_geom_target_pub = self.create_publisher(
+            Point,
+            '/robot/ik_geom_target',
+            10
+        )
+
+        self.ik_geom_result_sub = self.create_subscription(
+            IKResult,
+            '/robot/ik_geom_result',
+            self.on_ik_geom_result,
+            10
+        )
+
+        self.pending_ik_geom_result = None
+
+
+        # ====================================================
         # VERIFICACIÓN MTH (matriz de transformación homogénea)
         #
         # No usa tópicos: es un cálculo cerrado (sin iteraciones)
@@ -460,6 +485,7 @@ class TeleopNode(Node):
         self.last_ik_target = None
         self.last_ik_jacob_target = None
         self.last_ik_des_target = None
+        self.last_ik_geom_target = None
 
 
         # ====================================================
@@ -477,7 +503,7 @@ class TeleopNode(Node):
         # Tamaño inicial de la ventana
         # ----------------------------------------------------
 
-        self.root.geometry("780x740")
+        self.root.geometry("980x740")
 
         self.root.resizable(
             False,
@@ -587,6 +613,11 @@ class TeleopNode(Node):
             padding=8
         )
 
+        tab_ik_geom = ttk.Frame(
+            notebook,
+            padding=8
+        )
+
         notebook.add(
             tab_fk,
             text="Cinemática directa"
@@ -605,6 +636,11 @@ class TeleopNode(Node):
         notebook.add(
             tab_ik_des,
             text="Cinemática inversa (Desacople)"
+        )
+
+        notebook.add(
+            tab_ik_geom,
+            text="Cinemática inversa (Geométrico)"
         )
 
 
@@ -1607,6 +1643,194 @@ class TeleopNode(Node):
 
 
         # ====================================================
+        # PESTAÑA DE CINEMÁTICA INVERSA (GEOMÉTRICO)
+        # ====================================================
+
+        ikg_coords_frame = ttk.LabelFrame(
+            tab_ik_geom,
+            text="Coordenada objetivo (mm)",
+            padding=8,
+            style='Section.TLabelframe'
+        )
+
+        ikg_coords_frame.pack(
+            fill='x',
+            pady=(0, 8)
+        )
+
+        self.ikg_entries = {}
+
+        for i, axis in enumerate(('X', 'Y', 'Z')):
+
+            label = ttk.Label(
+                ikg_coords_frame,
+                text=f"{axis}:"
+            )
+
+            label.grid(
+                row=0,
+                column=i * 2,
+                padx=(5, 3),
+                pady=5
+            )
+
+            entry = tk.Entry(
+                ikg_coords_frame,
+                width=8,
+                justify='center'
+            )
+
+            entry.insert(
+                0,
+                "0.0"
+            )
+
+            entry.grid(
+                row=0,
+                column=i * 2 + 1,
+                padx=(0, 10),
+                pady=5
+            )
+
+            self.ikg_entries[axis] = entry
+
+        ikg_send_button = ttk.Button(
+            ikg_coords_frame,
+            text="Calcular y enviar",
+            command=self.send_ik_geom_target
+        )
+
+        ikg_send_button.grid(
+            row=1,
+            column=0,
+            columnspan=3,
+            pady=(5, 0)
+        )
+
+        ikg_home_button = tk.Button(
+            ikg_coords_frame,
+            text="Home",
+            bg='#ffdddd',
+            command=self.go_home_geom
+        )
+
+        ikg_home_button.grid(
+            row=1,
+            column=3,
+            columnspan=3,
+            pady=(5, 0)
+        )
+
+
+        # ----------------------------------------------------
+        # RESULTADO (q1, q2, q3)
+        # ----------------------------------------------------
+
+        ikg_result_frame = ttk.LabelFrame(
+            tab_ik_geom,
+            text="Resultado",
+            padding=8,
+            style='Section.TLabelframe'
+        )
+
+        ikg_result_frame.pack(
+            fill='x',
+            pady=(0, 8)
+        )
+
+        self.ikg_q_labels = []
+
+        for i, name in enumerate(
+            ('q1 (Hip Roll)', 'q2 (Hip Pitch)', 'q3 (Knee)')
+        ):
+
+            label = ttk.Label(
+                ikg_result_frame,
+                text=f"{name}:",
+                width=16
+            )
+
+            label.grid(
+                row=i,
+                column=0,
+                padx=(5, 5),
+                pady=3,
+                sticky='w'
+            )
+
+            value_label = ttk.Label(
+                ikg_result_frame,
+                text="--",
+                width=10
+            )
+
+            value_label.grid(
+                row=i,
+                column=1,
+                padx=(0, 5),
+                pady=3,
+                sticky='w'
+            )
+
+            self.ikg_q_labels.append(
+                value_label
+            )
+
+
+        # ----------------------------------------------------
+        # APLICAR A HARDWARE (ESP32 real)
+        # ----------------------------------------------------
+
+        ikg_hardware_button = tk.Button(
+            tab_ik_geom,
+            text="Aplicar a motores (HARDWARE)",
+            bg='#ffdddd',
+            command=lambda: self.apply_to_hardware(self.set_ik_geom_status)
+        )
+
+        ikg_hardware_button.pack(
+            pady=(0, 8)
+        )
+
+
+        # ----------------------------------------------------
+        # TRAYECTORIA DESDE ARCHIVO (trayectoria.txt)
+        # ----------------------------------------------------
+
+        self.build_trajectory_frame(
+            tab_ik_geom,
+            'geom',
+            self.ikg_entries,
+            self.send_ik_geom_target,
+            self.set_ik_geom_status
+        )
+
+
+        # ----------------------------------------------------
+        # VERIFICACIÓN MTH DEL RESULTADO
+        # ----------------------------------------------------
+
+        self.ikg_mth = self.build_mth_verification(tab_ik_geom)
+
+
+        # ----------------------------------------------------
+        # MENSAJE DE ESTADO (pestaña Geométrico)
+        # ----------------------------------------------------
+
+        self.ikg_status_label = tk.Label(
+            tab_ik_geom,
+            text="Ingrese una coordenada y presione \"Calcular y enviar\".",
+            font=('Arial', 10, 'bold'),
+            wraplength=380,
+            justify='center'
+        )
+
+        self.ikg_status_label.pack(
+            pady=(5, 0)
+        )
+
+
+        # ====================================================
         # ACTUALIZACIÓN INICIAL DE CINEMÁTICA
         # ====================================================
 
@@ -2063,6 +2287,8 @@ class TeleopNode(Node):
                 )
             elif key == 'des':
                 q1, q2, q3, ok = cinematica_inversa_pata_des(x, y, z)
+            elif key == 'geom':
+                q1, q2, q3, ok = cinematica_inversa_pata_geom(x, y, z)
             else:
                 q1, q2, q3, ok = cinematica_inversa_pata_alg(x, y, z)
 
@@ -2764,10 +2990,161 @@ class TeleopNode(Node):
 
 
     # ========================================================
+    # CINEMÁTICA INVERSA (GEOMÉTRICO) - ENVIAR OBJETIVO
+    # ========================================================
+
+    def send_ik_geom_target(self):
+
+        try:
+            x = float(self.ikg_entries['X'].get())
+            y = float(self.ikg_entries['Y'].get())
+            z = float(self.ikg_entries['Z'].get())
+
+        except ValueError:
+
+            self.set_ik_geom_status(
+                "Error: X, Y, Z deben ser valores numéricos.",
+                "red"
+            )
+
+            return
+
+        self.last_ik_geom_target = (x, y, z)
+
+        point = Point()
+        point.x = x
+        point.y = y
+        point.z = z
+
+        self.ik_geom_target_pub.publish(point)
+
+        self.set_ik_geom_status(
+            "Calculando...",
+            "gray"
+        )
+
+
+    # ========================================================
+    # CINEMÁTICA INVERSA (GEOMÉTRICO) - IR A HOME
+    # ========================================================
+
+    def go_home_geom(self):
+
+        self.ikg_entries['X'].delete(0, tk.END)
+        self.ikg_entries['X'].insert(0, f"{HOME_X}")
+
+        self.ikg_entries['Y'].delete(0, tk.END)
+        self.ikg_entries['Y'].insert(0, f"{HOME_Y}")
+
+        self.ikg_entries['Z'].delete(0, tk.END)
+        self.ikg_entries['Z'].insert(0, f"{HOME_Z}")
+
+        self.send_ik_geom_target()
+
+
+    # ========================================================
+    # CINEMÁTICA INVERSA (GEOMÉTRICO) - RECEPCIÓN DEL RESULTADO
+    # (hilo de ROS; solo guarda el dato, ver refresh())
+    # ========================================================
+
+    def on_ik_geom_result(self, msg):
+
+        self.pending_ik_geom_result = msg
+
+
+    # ========================================================
+    # CINEMÁTICA INVERSA (GEOMÉTRICO) - APLICAR RESULTADO
+    # (hilo de Tkinter, llamado desde refresh())
+    # ========================================================
+
+    def apply_ik_geom_result(self, result):
+
+        if not result.reachable:
+
+            for label in self.ikg_q_labels:
+                label.config(text="--")
+
+            self.set_ik_geom_status(
+                "✗ Posición no alcanzable.",
+                "red"
+            )
+
+            self.reset_mth_verification(self.ikg_mth)
+
+            return
+
+        q_deg = [math.degrees(q) for q in result.position]
+
+        for label, value in zip(self.ikg_q_labels, q_deg):
+            label.config(text=f"{value:.2f}°")
+
+
+        # ----------------------------------------------------
+        # Movemos el modelo en RViz por el mismo camino que las
+        # demás pestañas (kinematics_node -> control_node ->
+        # robot_state_publisher).
+        # ----------------------------------------------------
+
+        command_msg = RobotCommand()
+        command_msg.position = list(result.position)
+        self.command_pub.publish(command_msg)
+
+
+        # ----------------------------------------------------
+        # Sincronizamos sliders/entradas/matriz de la pestaña
+        # de cinemática directa con la nueva pose.
+        # ----------------------------------------------------
+
+        for i in range(min(self.num_joints, len(q_deg))):
+
+            self.target_deg[i] = q_deg[i]
+
+            self.sliders[i].set(q_deg[i])
+
+            self.slider_labels[i].config(
+                text=f"{q_deg[i]:.1f}°"
+            )
+
+            self.entries[i].delete(0, tk.END)
+            self.entries[i].insert(0, f"{q_deg[i]:.1f}")
+
+        self.update_kinematics()
+
+        if self.last_ik_geom_target is not None:
+            x_obj, y_obj, z_obj = self.last_ik_geom_target
+            self.update_mth_verification(
+                self.ikg_mth,
+                result.position[0], result.position[1], result.position[2],
+                x_obj, y_obj, z_obj
+            )
+            self.add_trail_point(x_obj, y_obj, z_obj)
+
+        if self._on_trajectory_ik_result('geom'):
+            return
+
+        self.set_ik_geom_status(
+            "✓ Movimiento realizado.",
+            "green"
+        )
+
+
+    # ========================================================
+    # CINEMÁTICA INVERSA (GEOMÉTRICO) - MENSAJE DE ESTADO
+    # ========================================================
+
+    def set_ik_geom_status(self, message, color):
+
+        self.ikg_status_label.config(
+            text=message,
+            foreground=color
+        )
+
+
+    # ========================================================
     # VERIFICACIÓN MTH - CONSTRUCCIÓN DEL WIDGET
     #
     # Se llama una vez por cada pestaña de cinemática inversa
-    # (algebraica, Jacobiano, desacople). Devuelve un diccionario
+    # (algebraica, Jacobiano, desacople, geométrico). Devuelve un diccionario
     # con las referencias gráficas que después actualizan
     # update_mth_verification() / reset_mth_verification().
     # ========================================================
@@ -3135,6 +3512,14 @@ class TeleopNode(Node):
             )
 
             self.pending_ik_des_result = None
+
+        if self.pending_ik_geom_result is not None:
+
+            self.apply_ik_geom_result(
+                self.pending_ik_geom_result
+            )
+
+            self.pending_ik_geom_result = None
 
 
         # ----------------------------------------------------
