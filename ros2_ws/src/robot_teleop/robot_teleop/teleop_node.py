@@ -78,7 +78,7 @@ from robot_kinematics.kinem_invers_leg_mth_Desacople import (
 
 HOME_X = 850.28
 HOME_Y = 0.0
-HOME_Z = 306.98
+HOME_Z = -306.98   # pierna izquierda (q = 0)
 
 
 # ============================================================
@@ -2303,6 +2303,34 @@ class TeleopNode(Node):
         marker.id = 0
         marker.type = Marker.LINE_STRIP
         marker.action = Marker.ADD
+
+        # ----------------------------------------------------
+        # Los puntos están en el marco base de la DH
+        # (kinem_leg_gen), que no coincide con Base_link:
+        #
+        #   X DH (largo de la pierna) -> -Y Base_link
+        #   Y DH (adelante/atrás)     -> +X Base_link
+        #   Z DH (lateral)            -> +Z Base_link
+        #
+        # Es una rotación de -90° en Z más un desplazamiento
+        # del origen (medido contra el URDF, en metros). Se
+        # aplica con la pose del Marker, así los puntos
+        # quedan tal cual vienen de la cinemática.
+        # ----------------------------------------------------
+
+        if self.leg_side == 'left':
+            offset = (0.0950, -0.0071, 0.0050)
+        else:
+            offset = (0.0816, -0.0070, -0.0056)
+
+        marker.pose.position.x = offset[0]
+        marker.pose.position.y = offset[1]
+        marker.pose.position.z = offset[2]
+
+        marker.pose.orientation.x = 0.0
+        marker.pose.orientation.y = 0.0
+        marker.pose.orientation.z = -math.sqrt(0.5)
+        marker.pose.orientation.w = math.sqrt(0.5)
 
         marker.scale.x = 0.005
 

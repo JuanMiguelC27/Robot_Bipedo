@@ -2,32 +2,32 @@
 Cinemática inversa
 Implementación algebraica (roll-pitch-pitch con offset DH).
 Modelo nuevo: con articulación fantasma (1A2) y eslabón L6.
+Pierna IZQUIERDA.
 """
 
 import numpy as np
 
 L1, L2, L3, L4, L5, L6 = 147.03, 105.1, 159.95, 94.9, 311.97, 338.31
 
-x, y, z = 850.28, 0, 306.98   # objetivo de prueba (q1=q2=q3=0 con L=1)
+x, y, z = 265.05, 0, -892.21   # objetivo de prueba
 
 # Límites articulares [°]
 q1_min, q1_max = 0, 90
-q2_min, q2_max = 45, 225
-q3_min, q3_max = 45, 225
+q2_min, q2_max = -90 , 90
+q3_min, q3_max = -90, 90
 
 def cinematica_inversa_pata_alg(x, y, z,
                                 L1=L1, L2=L2, L3=L3, L4=L4, L5=L5, L6=L6,
                                 codo="arriba"):
     xp = x - L2
-    zp = z - L1
-    rho2 = xp**2 + zp**2
+    zp = z + L1                                   # <- z + L1, no z - L1
 
-    disc = rho2 - L3**2
+    disc = xp**2 + zp**2 - L3**2
     if disc < 0:
         return None, None, None, False
     r = np.sqrt(disc)
 
-    q1 = np.arctan2(zp, xp) - np.arctan2(L3, r)
+    q1 = -np.arctan2(L3, r) - np.arctan2(zp, xp)   # <- L3 reflejado (d = -L3)
 
     u = r - L4
     v = y

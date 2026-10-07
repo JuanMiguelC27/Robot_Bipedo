@@ -23,12 +23,12 @@ import numpy as np
 # ----------------------------------------------------------------------
 #L1, L2, L3, L4, L5, L6 = 14.703, 10.51, 15.995, 9.49, 31.197, 33.831
 
-L1 = 14.703
-L2 = 10.51
-L3 = 15.995
-L4 = 9.49
-L5 = 31.197
-L6 = 33.831 
+L1 = 147.03
+L2 = 105.1
+L3 = 159.95
+L4 = 94.9
+L5 = 311.97
+L6 = 338.31 
 
 
 # ----------------------------------------------------------------------
@@ -158,9 +158,10 @@ def forward_kinematics_left(q):
     q1, q2, q3 = np.radians(q)
 
     # --------------------------------------------------------------
-    # Transformaciones DH (mismas L3, L4, L5, L6 y mismos alpha que
-    # la pierna derecha; solo se refleja el signo de L1 y el alpha
-    # del tramo cadera, igual que en la versión anterior)
+    # Transformaciones DH (mismas L4, L5, L6 y mismos alpha que la
+    # pierna derecha). Es el espejo de la derecha respecto al plano
+    # z = 0: se reflejan los desplazamientos laterales L1 y L3 y el
+    # alpha del tramo cadera.
     # --------------------------------------------------------------
 
     A01 = dh_matrix(
@@ -179,7 +180,7 @@ def forward_kinematics_left(q):
 
     A23 = dh_matrix(
         0,
-        d=L3,
+        d=-L3,
         a=L4,
         alpha=0
     )

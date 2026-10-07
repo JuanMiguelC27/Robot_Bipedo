@@ -9,9 +9,9 @@
 #
 # Este nodo extrae los 3 valores y los publica como Float32MultiArray en
 # el orden de los canales fisicos:
-#     [0] = Hip   (canal 0)
-#     [1] = Knee  (canal 1)
-#     [2] = Ankle (canal 2)
+#     [0] = Hip Roll  (canal 0)
+#     [1] = Hip Pitch (canal 1)
+#     [2] = Knee      (canal 2)
 #
 # Uso:
 #   ros2 run robot_serial_bridge serial_bridge --ros-args \
@@ -106,7 +106,7 @@ class SerialBridge(Node):
             return
 
         msg = Float32MultiArray()
-        msg.data = angles   # [Hip, Knee, Ankle]
+        msg.data = angles   # [Hip Roll, Hip Pitch, Knee]
         self.pub.publish(msg)
 
 

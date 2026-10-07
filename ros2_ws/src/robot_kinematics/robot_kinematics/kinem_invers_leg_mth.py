@@ -3,6 +3,7 @@ Cinemática inversa de la pata del robot bípedo.
 
 Implementación por matriz final MTH (roll-pitch-pitch con offset DH).
 Modelo nuevo: con articulación fantasma (1A2) y eslabón L6.
+Pata IZQUIERDA.
 
 Este método no recibe un punto (x, y, z): recibe la matriz de
 transformación homogénea T deseada (posición + orientación), porque
@@ -13,12 +14,12 @@ q1, q2, q3, igual que la posición.
 
 import numpy as np
 
-L1, L2, L3, L4, L5, L6 = 14.703, 10.51, 15.995, 9.49, 31.197, 33.831 
+L1, L2, L3, L4, L5, L6 = 147.03, 105.1, 159.95, 94.9, 311.97, 338.31
 
-q1_deg, q2_deg, q3_deg = 45, 0, 0   # ángulos de prueba, para armar Tdes
+q1_deg, q2_deg, q3_deg = 0, 0, 0   # ángulos de prueba, para armar Tdes
 
 # Límites articulares [°]
-q1_min, q1_max = 0, 90
+q1_min, q1_max = -160, 90
 q2_min, q2_max = -115, 115
 q3_min, q3_max = -85, 65
 
@@ -34,11 +35,11 @@ def dh_matrix(theta, d, a, alpha):
 
 
 def fk_T(q1, q2, q3, L1, L2, L3, L4, L5, L6):
-    A01 = dh_matrix(0,  d=L1, a=L2, alpha=np.pi/2)
-    A12 = dh_matrix(q1, d=0,  a=0,  alpha=-np.pi/2)   # fantasma
-    A23 = dh_matrix(0,  d=L3, a=L4, alpha=0)
-    A34 = dh_matrix(q2, d=0,  a=L5, alpha=np.pi)
-    A45 = dh_matrix(q3, d=0,  a=L6, alpha=0)
+    A01 = dh_matrix(0,  d=-L1, a=L2, alpha=-np.pi/2)
+    A12 = dh_matrix(q1, d=0,   a=0,  alpha=np.pi/2)   # fantasma
+    A23 = dh_matrix(0,  d=-L3, a=L4, alpha=0)   # L3 reflejado (igual que kinem_leg_gen)
+    A34 = dh_matrix(q2, d=0,   a=L5, alpha=np.pi)
+    A45 = dh_matrix(q3, d=0,   a=L6, alpha=0)
     return A01 @ A12 @ A23 @ A34 @ A45                 # = 0A5
 
 
@@ -54,11 +55,11 @@ def cinematica_inversa_pata_mth(T, L1, L2, L3, L4, L5, L6):
     ax, az = T[0, 2], T[2, 2]
     px, py, pz = T[0, 3], T[1, 3], T[2, 3]
 
-    q1 = np.arctan2(ax, -az)
+    q1 = np.arctan2(-ax, -az)
     c1, s1 = np.cos(q1), np.sin(q1)
 
     s2 = (py - L6*ny) / L5
-    c2 = (c1*(px - L2) + s1*(pz - L1) - L4 - L6*(c1*nx + s1*nz)) / L5
+    c2 = (c1*(px - L2) - s1*(pz + L1) - L4 - L6*(c1*nx - s1*nz)) / L5
     q2 = np.arctan2(s2, c2)
 
     q23 = np.arctan2(ny, -oy)                  # q2 - q3

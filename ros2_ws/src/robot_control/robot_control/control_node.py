@@ -90,20 +90,16 @@ class ControlNode(Node):
         #
         # Se relee cada ciclo.
         #
-        # cadera-roll (indice 0) hoy NO es el limite nominal
-        # del URDF (-0.34907 rad / -20 grados):
-        # esta en -1.91986 rad (-110 grados) por un offset
-        # fisico temporal del motor.
-        #
-        # Cuando se recalibre, volver a poner -0.34907 aca
-        # (y el equivalente en teleop_node.py).
+        # cadera-roll (indice 0): limite real 0 a 90 grados
+        # (0 a 1.5708 rad), igual que lower_deg/upper_deg en
+        # teleop_node.py.
         #
         # ====================================================
 
         self.declare_parameter(
             'joint_limits_lower',
             [
-                -0.139626,
+                0.0,
                 -1.5708,
                 -1.5708
             ]
