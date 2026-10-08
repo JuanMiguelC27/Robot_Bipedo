@@ -1,12 +1,15 @@
 # ============================================================
-# NODO DE CINEMÁTICA INVERSA (MÉTODO DEL JACOBIANO)
+# NODO DE CINEMÁTICA INVERSA (GRADIENTE DESCENDENTE)
 # ============================================================
 #
 # Recibe un objetivo (x, y, z, semilla q1/q2/q3) en
-# /robot/ik_jacob_target y publica en /robot/ik_jacob_result:
+# /robot/ik_grad_target y publica en /robot/ik_grad_result:
 #
 #   - reachable: si el método converge.
 #   - position:  q1, q2, q3 [rad] resultantes (si aplica).
+#
+# Usa el mismo mensaje IKJacobTarget que el Jacobiano, porque
+# también es iterativo y necesita semilla.
 #
 # ============================================================
 
@@ -17,16 +20,16 @@ from rclpy.node import Node
 
 from robot_interfaces.msg import IKJacobTarget, IKResult
 
-from robot_kinematics.kinem_invers_leg_jacob import (
-    cinematica_inversa_pata_jacob,
+from robot_kinematics.kinem_invers_leg_gradiente_descendente import (
+    cinematica_inversa_pata_grad,
     joint_limit_warnings,
 )
 
 
-class IKJacobNode(Node):
+class IKGradNode(Node):
 
     def __init__(self):
-        super().__init__('ik_jacob_node')
+        super().__init__('ik_grad_node')
 
         self.declare_parameter('leg_side', 'left')
         self.leg_side = (
@@ -37,16 +40,16 @@ class IKJacobNode(Node):
         )
 
         self.target_sub = self.create_subscription(
-            IKJacobTarget, '/robot/ik_jacob_target', self.on_target, 10)
+            IKJacobTarget, '/robot/ik_grad_target', self.on_target, 10)
 
         self.result_pub = self.create_publisher(
-            IKResult, '/robot/ik_jacob_result', 10)
+            IKResult, '/robot/ik_grad_result', 10)
 
         self.get_logger().info(
-            f'ik_jacob_node listo (pierna {self.leg_side})')
+            f'ik_grad_node listo (pierna {self.leg_side})')
 
     def on_target(self, msg):
-        q1, q2, q3, alcanzable = cinematica_inversa_pata_jacob(
+        q1, q2, q3, alcanzable = cinematica_inversa_pata_grad(
             msg.x, msg.y, msg.z,
             msg.q1_seed, msg.q2_seed, msg.q3_seed)
 
@@ -73,7 +76,7 @@ class IKJacobNode(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    rclpy.spin(IKJacobNode())
+    rclpy.spin(IKGradNode())
     rclpy.shutdown()
 
 

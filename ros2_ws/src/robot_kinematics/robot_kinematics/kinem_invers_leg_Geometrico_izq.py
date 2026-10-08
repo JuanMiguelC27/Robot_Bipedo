@@ -3,9 +3,8 @@ Cinemática inversa de la pata del robot bípedo.
 
 Implementación geométrica (seno/coseno explícitos, roll-pitch-pitch
 con offset DH). Modelo nuevo: con articulación fantasma (1A2) y
-eslabón L6. Pata IZQUIERDA (misma tabla y convención que forward_kinematics_left en
-cinematica_directa_der_izq.py: alpha=+90° en 1A2, d=-L3 en 2A3;
-+q2 lleva la pierna adelante, +q3 la lleva atrás).
+eslabón L6. Pata IZQUIERDA (tabla corregida: alpha=-90° en 0A1 y 1A2,
+ alpha=180° en 2A3 y 3A4).
 """
 
 import numpy as np
@@ -15,9 +14,9 @@ L1, L2, L3, L4, L5, L6 = 147.03, 105.1, 159.95, 94.9, 311.97, 338.31
 x, y, z = 850.28, 0.0, -306.98   # objetivo de prueba (q1=q2=q3=0)
 
 # Límites articulares [°]
-q1_min, q1_max = -160, 90
-q2_min, q2_max = -115, 115
-q3_min, q3_max = -85, 65
+q1_min, q1_max = 0, 90
+q2_min, q2_max = -90, 90
+q3_min, q3_max = -90, 90
 
 
 def cinematica_inversa_pata_geom(x, y, z, L1, L2, L3, L4, L5, L6, codo="arriba"):
@@ -26,8 +25,7 @@ def cinematica_inversa_pata_geom(x, y, z, L1, L2, L3, L4, L5, L6, codo="arriba")
     la cadera roll, plano del "brazo" para rodilla y cadera pitch),
     usando seno/coseno en vez de atan2 con offset.
 
-    codo="arriba" -> sin(q3) positivo (rodilla hacia atrás, misma rama
-                     que el algebraico, el desacople y el Jacobiano)
+    codo="arriba" -> sin(q3) positivo
     codo="abajo"  -> sin(q3) negativo
 
     Retorna (q1, q2, q3, alcanzable).
@@ -48,7 +46,7 @@ def cinematica_inversa_pata_geom(x, y, z, L1, L2, L3, L4, L5, L6, codo="arriba")
 
     # Paso 3: posición del "brazo" (plano XY) y q3
     x_arm = R - L4
-    y_arm = y
+    y_arm = y                                        # <- y (modelo nuevo: py = +(L5 s2 + L6 s23))
 
     c3 = (x_arm**2 + y_arm**2 - L5**2 - L6**2) / (2*L5*L6)
     if abs(c3) > 1 + 1e-9:
@@ -57,7 +55,6 @@ def cinematica_inversa_pata_geom(x, y, z, L1, L2, L3, L4, L5, L6, codo="arriba")
 
     s3 = np.sqrt(1 - c3**2) * (1 if codo == "arriba" else -1)
     q3 = np.arctan2(s3, c3)
-
     # Paso 4: q2
     k1 = L5 + L6*np.cos(q3)
     k2 = L6*np.sin(q3)

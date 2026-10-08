@@ -26,7 +26,8 @@ Este launch inicia:
        - Abre la interfaz gráfica.
        - Permite controlar las tres articulaciones.
        - Publica /robot/command.
-       - Publica /servo_commands.
+       - Publica /robot/hardware_command (control_node lo
+         verifica y publica /servo_commands).
        - Muestra la cinemática directa de la pierna derecha.
 
     6. RViz2

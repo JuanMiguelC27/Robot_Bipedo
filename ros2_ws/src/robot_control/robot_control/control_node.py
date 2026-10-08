@@ -14,16 +14,32 @@
 #   Cuando verify_mode=false, se puede volver al modo PID para
 #   control avanzado (trayectorias, IK, etc.).
 #
+# HARDWARE (ESP32 real):
+#   Es el ÚNICO camino hacia los motores. El teleop manda la
+#   pose (radianes, ángulo cinemático) por
+#   /robot/hardware_command solo al apretar "Aplicar a
+#   motores". Acá se revisa el e-stop y los límites
+#   articulares (los mismos de RViz); si todo está bien se
+#   suma el offset de cada servo y se publica en
+#   /servo_commands. Si no, se RECHAZA el comando completo
+#   (no se recorta) y se avisa por /robot/hardware_status.
+#
+#   También convierte /servo_states (grados del servo) a
+#   grados cinemáticos en /robot/hardware_state, para que el
+#   teleop no necesite conocer los offsets.
+#
 # Uso:
 #   ros2 param set /control_node verify_mode true
 #
 # ============================================================
 
 
+import math
+
 import rclpy
 from rclpy.node import Node
 
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, Float32MultiArray, String
 
 from robot_interfaces.msg import JointTarget, JointState
 
@@ -116,6 +132,34 @@ class ControlNode(Node):
 
 
         # ====================================================
+        # OFFSETS DE LOS SERVOS (HARDWARE)
+        # ====================================================
+        #
+        # Grados que se suman al ángulo cinemático para
+        # obtener el ángulo que entiende el firmware
+        # (servo = q + offset). Es la única fuente de verdad:
+        # el teleop ya no los conoce.
+        #
+        # El firmware (servo_params.h) recorta con sus propios
+        # angleMin/angleMax en ese mismo sistema de grados.
+        #
+        # REVISAR Hip Roll: el firmware espera 165..270
+        # (home 180); con offset 0 los comandos (0..90) quedan
+        # recortados a 165 en la ESP32.
+        #
+        # ====================================================
+
+        self.declare_parameter(
+            'servo_offset_deg',
+            [
+                0.0,      # Hip Roll
+                135.0,    # Hip Pitch
+                135.0     # Knee
+            ]
+        )
+
+
+        # ====================================================
         # MODO DE VERIFICACIÓN
         # ====================================================
         #
@@ -176,6 +220,28 @@ class ControlNode(Node):
         )
 
 
+        # Comando para el hardware real (solo al apretar
+        # "Aplicar a motores" en el teleop).
+
+        self.hw_cmd_sub = self.create_subscription(
+            JointTarget,
+            '/robot/hardware_command',
+            self.on_hardware_command,
+            10
+        )
+
+
+        # Posición real de los servos, publicada por el
+        # firmware del ESP32 (grados del servo).
+
+        self.servo_state_sub = self.create_subscription(
+            Float32MultiArray,
+            '/servo_states',
+            self.on_servo_states,
+            10
+        )
+
+
         # ====================================================
         # PUBLICADORES
         # ====================================================
@@ -206,6 +272,37 @@ class ControlNode(Node):
         self.cmd_pub = self.create_publisher(
             JointTarget,
             '/robot/joint_commands',
+            10
+        )
+
+
+        # Comando hacia el ESP32 real (grados del servo, ya
+        # verificado y con offset sumado).
+
+        self.servo_pub = self.create_publisher(
+            Float32MultiArray,
+            '/servo_commands',
+            10
+        )
+
+
+        # Respuesta a cada /robot/hardware_command:
+        #   "OK|<texto>"         -> se envió a los motores
+        #   "RECHAZADO|<motivo>" -> no se envió nada
+
+        self.hw_status_pub = self.create_publisher(
+            String,
+            '/robot/hardware_status',
+            10
+        )
+
+
+        # Posición real de los servos en grados CINEMÁTICOS
+        # (/servo_states menos el offset de cada servo).
+
+        self.hw_state_pub = self.create_publisher(
+            Float32MultiArray,
+            '/robot/hardware_state',
             10
         )
 
@@ -288,6 +385,161 @@ class ControlNode(Node):
         """
 
         self.e_stop = msg.data
+
+
+    # ========================================================
+    # COMANDO PARA EL HARDWARE REAL
+    # ========================================================
+
+    def on_hardware_command(self, msg):
+        """
+        Verifica la pose pedida para los motores reales y, si
+        es válida, la publica en /servo_commands.
+
+        msg.position llega en radianes (ángulo cinemático, la
+        misma convención que /robot/command). Si algo falla
+        se rechaza el comando COMPLETO: recortar movería la
+        pata a una pose distinta de la que se vio en RViz.
+        """
+
+        lower = self.get_parameter('joint_limits_lower').value
+        upper = self.get_parameter('joint_limits_upper').value
+        offset = self.get_parameter('servo_offset_deg').value
+
+
+        # ----------------------------------------------------
+        # 1. E-STOP
+        # ----------------------------------------------------
+
+        if self.e_stop:
+
+            self.reject_hardware(
+                'e-stop activo; no se envía nada a los motores.'
+            )
+
+            return
+
+
+        # ----------------------------------------------------
+        # 2. TAMAÑO Y VALORES NUMÉRICOS
+        # ----------------------------------------------------
+
+        q = list(msg.position)
+
+        if len(q) != self.n:
+
+            self.reject_hardware(
+                f'se esperaban {self.n} ángulos y llegaron {len(q)}.'
+            )
+
+            return
+
+        if not all(math.isfinite(v) for v in q):
+
+            self.reject_hardware(
+                'hay ángulos que no son números válidos (NaN/inf).'
+            )
+
+            return
+
+
+        # ----------------------------------------------------
+        # 3. LÍMITES ARTICULARES (los mismos que RViz)
+        #
+        # Tolerancia mínima para no rechazar soluciones de IK
+        # que quedan en el borde por redondeo.
+        # ----------------------------------------------------
+
+        tol = 1e-6
+
+        fuera = [
+            f'{self.joint_names[i]}={math.degrees(q[i]):.1f}° '
+            f'(rango {math.degrees(lower[i]):.1f}° a '
+            f'{math.degrees(upper[i]):.1f}°)'
+            for i in range(self.n)
+            if not (lower[i] - tol <= q[i] <= upper[i] + tol)
+        ]
+
+        if fuera:
+
+            self.reject_hardware(
+                'fuera de límites: ' + ', '.join(fuera)
+            )
+
+            return
+
+
+        # ----------------------------------------------------
+        # 4. CONVERTIR A GRADOS DEL SERVO Y ENVIAR
+        # ----------------------------------------------------
+
+        q_deg = [
+            math.degrees(max(lower[i], min(upper[i], q[i])))
+            for i in range(self.n)
+        ]
+
+        servo_msg = Float32MultiArray()
+
+        servo_msg.data = [
+            float(q_deg[i] + offset[i])
+            for i in range(self.n)
+        ]
+
+        self.servo_pub.publish(
+            servo_msg
+        )
+
+        texto = ', '.join(f'{v:.1f}°' for v in q_deg)
+
+        self.get_logger().info(
+            f'Hardware: enviado q=[{texto}] -> '
+            f'servo={[round(v, 1) for v in servo_msg.data]}'
+        )
+
+        status = String()
+        status.data = f'OK|Enviado a los motores: [{texto}]'
+        self.hw_status_pub.publish(status)
+
+
+    def reject_hardware(self, motivo):
+        """
+        Avisa que un /robot/hardware_command no se envió.
+        """
+
+        self.get_logger().warn(
+            f'Hardware: comando RECHAZADO, {motivo}'
+        )
+
+        status = String()
+        status.data = f'RECHAZADO|{motivo}'
+        self.hw_status_pub.publish(status)
+
+
+    # ========================================================
+    # POSICIÓN REAL DE LOS SERVOS
+    # ========================================================
+
+    def on_servo_states(self, msg):
+        """
+        Convierte /servo_states (grados del servo) a grados
+        cinemáticos restando el offset de cada servo, y lo
+        publica en /robot/hardware_state.
+        """
+
+        offset = self.get_parameter('servo_offset_deg').value
+
+        n = min(self.n, len(msg.data), len(offset))
+
+        out = Float32MultiArray()
+
+        out.data = [
+            float(msg.data[i] - offset[i])
+            for i in range(n)
+        ]
+
+        self.hw_state_pub.publish(
+            out
+        )
 
 
     # ========================================================

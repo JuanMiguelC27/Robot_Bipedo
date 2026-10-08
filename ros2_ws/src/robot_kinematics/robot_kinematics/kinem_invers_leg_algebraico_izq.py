@@ -2,9 +2,7 @@
 Cinemática inversa
 Implementación algebraica (roll-pitch-pitch con offset DH).
 Modelo nuevo: con articulación fantasma (1A2) y eslabón L6.
-Pierna IZQUIERDA (misma tabla y convención que forward_kinematics_left en
-cinematica_directa_der_izq.py: alpha=+90° en 1A2, d=-L3 en 2A3;
-+q2 lleva la pierna adelante, +q3 la lleva atrás).
+Pierna IZQUIERDA.
 """
 
 import numpy as np
@@ -14,9 +12,9 @@ L1, L2, L3, L4, L5, L6 = 147.03, 105.1, 159.95, 94.9, 311.97, 338.31
 x, y, z = 850.28, 0.0, -306.98   # objetivo de prueba (q1=q2=q3=0)
 
 # Límites articulares [°]
-q1_min, q1_max = -160, 90
-q2_min, q2_max = -115, 115
-q3_min, q3_max = -85, 65
+q1_min, q1_max = 0, 90
+q2_min, q2_max = -90, 90
+q3_min, q3_max = -90, 90
 
 def cinematica_inversa_pata_alg(x, y, z, L1, L2, L3, L4, L5, L6, codo="arriba"):
     xp = x - L2

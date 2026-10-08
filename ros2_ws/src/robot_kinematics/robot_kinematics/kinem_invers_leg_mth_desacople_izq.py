@@ -3,9 +3,8 @@ Cinemática inversa de la pata del robot bípedo.
 
 Implementación por desacople (premultiplicación por matrices inversas).
 Modelo nuevo: con articulación fantasma (1A2) y eslabón L6.
-Pata IZQUIERDA (misma tabla y convención que forward_kinematics_left en
-cinematica_directa_der_izq.py: alpha=+90° en 1A2, d=-L3 en 2A3;
-+q2 lleva la pierna adelante, +q3 la lleva atrás).
+Pata IZQUIERDA (tabla corregida: alpha=-90° en 0A1 y 1A2, alpha=180°
+en 2A3 y 3A4) .
 """
 
 import numpy as np
@@ -15,9 +14,9 @@ L1, L2, L3, L4, L5, L6 = 147.03, 105.1, 159.95, 94.9, 311.97, 338.31
 q1_deg, q2_deg, q3_deg = 0, 0, 0   # ángulos de prueba, para armar Tdes
 
 # Límites articulares [°]
-q1_min, q1_max = -160, 90
-q2_min, q2_max = -115, 115
-q3_min, q3_max = -85, 65
+q1_min, q1_max = 0, 90
+q2_min, q2_max = -90, 90
+q3_min, q3_max = -90, 90
 
 
 def dh_matrix(theta, d, a, alpha):
@@ -32,8 +31,8 @@ def dh_matrix(theta, d, a, alpha):
 
 def fk_T(q1, q2, q3, L1, L2, L3, L4, L5, L6):
     A01 = dh_matrix(0,  d=-L1, a=L2, alpha=-np.pi/2)
-    A12 = dh_matrix(q1, d=0,   a=0,  alpha=np.pi/2)    # fantasma
-    A23 = dh_matrix(0,  d=-L3, a=L4, alpha=0)
+    A12 = dh_matrix(q1, d=0,   a=0,  alpha=-np.pi/2)   # fantasma (corregido)
+    A23 = dh_matrix(0,  d=L3,  a=L4, alpha=np.pi)
     A34 = dh_matrix(q2, d=0,   a=L5, alpha=np.pi)
     A45 = dh_matrix(q3, d=0,   a=L6, alpha=0)
     return A01 @ A12 @ A23 @ A34 @ A45                 # = 0A5

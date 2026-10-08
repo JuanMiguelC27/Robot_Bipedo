@@ -58,7 +58,8 @@ robot_kinematics
     kinem_invers_leg_algebraico_izq.py     -> inversa algebraica  (ik_node)
     kinem_invers_leg_Geometrico_izq.py     -> inversa geométrica  (ik_geom_node)
     kinem_invers_leg_mth_desacople_izq.py  -> inversa por desacople (ik_des_node)
-    kinem_invers_leg_jacob.py              -> inversa por Jacobiano (ik_jacob_node)
+    kinem_invers_leg_Newton_izq.py         -> inversa por Newton-Raphson (ik_newton_node)
+    kinem_invers_leg_gradiente_descendente.py -> inversa por gradiente descendente (ik_grad_node)
     kinem_invers_leg_mth_izq.py            -> inversa por MTH; la interfaz la usa
                                               para verificar las demás soluciones
 
@@ -105,10 +106,11 @@ robot_teleop
       SIEMPRE el mismo límite que control_node.py, convertido a grados. Hoy:
       [-110, -115, -115] a [130, 115, 115] (mismos para ambas patas).
   Requiere pantalla/X.
-  Nota: no se tocó nada de cómo se envía la orden a los servos
-  (/servo_commands, home_angle_deg): eso lo consume tal cual
-  robot_serial_bridge hacia la ESP32 (micro-ROS/PlatformIO), que sigue
-  corriendo aparte, sin cambios.
+  Hardware: el botón "Aplicar a motores" publica /robot/hardware_command
+  (radianes, ángulo cinemático). control_node revisa e-stop y límites,
+  suma el offset de cada servo (parámetro servo_offset_deg) y publica
+  /servo_commands, que el firmware micro-ROS de la ESP32 consume vía
+  micro_ros_agent. La respuesta va por /robot/hardware_status.
 
 robot_bringup
   Un launch POR PATA (no uno conjunto): cada uno prende el mismo flujo de
@@ -231,8 +233,8 @@ Paso 6 (opcional) - Conectar la ESP32 real de esa pata (aparte del
 bringup, en otra terminal con source):
     ros2 run robot_serial_bridge serial_bridge -p port:=/dev/ttyUSBx
   Cambiar /dev/ttyUSBx por el puerto real de la ESP32 de la pata que estás
-  probando. El firmware (PlatformIO/micro-ROS) no cambió: sigue leyendo
-  /servo_commands igual que antes.
+  probando. El firmware (PlatformIO/micro-ROS) sigue leyendo
+  /servo_commands; ahora lo publica control_node (no el teleop).
 
 Paso 7 - Cerrar: Ctrl+C en cada terminal.
 

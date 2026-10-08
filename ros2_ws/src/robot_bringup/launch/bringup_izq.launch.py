@@ -18,12 +18,12 @@ Este launch inicia:
        - Calcula q1, q2, q3 (cinemática inversa algebraica).
        - Publica el resultado en /robot/ik_result.
 
-    3.1. ik_jacob_node
+    3.1. ik_newton_node
        - Recibe (x, y, z) + semilla (q1,q2,q3) en
-         /robot/ik_jacob_target.
+         /robot/ik_newton_target.
        - Calcula q1, q2, q3 (cinemática inversa iterativa,
-         método del jacobiano).
-       - Publica el resultado en /robot/ik_jacob_result.
+         método de Newton-Raphson).
+       - Publica el resultado en /robot/ik_newton_result.
 
     3.2. ik_des_node
        - Recibe una coordenada (x, y, z) en /robot/ik_des_target.
@@ -35,11 +35,23 @@ Este launch inicia:
        - Calcula q1, q2, q3 (cinemática inversa geométrica).
        - Publica el resultado en /robot/ik_geom_result.
 
+    3.4. ik_grad_node
+       - Recibe (x, y, z) + semilla (q1,q2,q3) en
+         /robot/ik_grad_target.
+       - Calcula q1, q2, q3 (cinemática inversa iterativa,
+         gradiente descendente).
+       - Publica el resultado en /robot/ik_grad_result.
+
     4. control_node
        - Recibe /robot/joint_targets.
        - Aplica los límites de seguridad articulares.
        - Publica /robot/joint_states.
        - Publica /robot/joint_commands.
+       - HARDWARE: recibe /robot/hardware_command, revisa e-stop
+         y límites, suma el offset de cada servo y publica
+         /servo_commands (ESP32). Responde en
+         /robot/hardware_status y convierte /servo_states a
+         grados cinemáticos en /robot/hardware_state.
 
     5. sim_bridge
        - Conecta los comandos de articulación con la simulación.
@@ -47,7 +59,8 @@ Este launch inicia:
     6. teleop_node
        - Abre la interfaz gráfica, con dos pestañas:
            - Cinemática directa: sliders/ángulos manuales,
-             publica /robot/command y /servo_commands.
+             publica /robot/command (RViz). El botón "Aplicar a
+             motores" publica /robot/hardware_command.
            - Cinemática inversa: coordenada X,Y,Z, publica
              /robot/ik_target y aplica el resultado recibido
              por /robot/ik_result.
@@ -274,15 +287,15 @@ def generate_launch_description():
 
 
     # ==================================================================
-    # 2.2. NODO DE CINEMÁTICA INVERSA (JACOBIANO)
+    # 2.2. NODO DE CINEMÁTICA INVERSA (NEWTON-RAPHSON)
     # ==================================================================
 
-    ik_jacob = Node(
+    ik_newton = Node(
         package='robot_kinematics',
 
-        executable='ik_jacob_node',
+        executable='ik_newton_node',
 
-        name='ik_jacob_node',
+        name='ik_newton_node',
 
         parameters=[
             {
@@ -321,6 +334,25 @@ def generate_launch_description():
         executable='ik_geom_node',
 
         name='ik_geom_node',
+
+        parameters=[
+            {
+                'leg_side': 'left'
+            }
+        ]
+    )
+
+
+    # ==================================================================
+    # 2.5. NODO DE CINEMÁTICA INVERSA (GRADIENTE DESCENDENTE)
+    # ==================================================================
+
+    ik_grad = Node(
+        package='robot_kinematics',
+
+        executable='ik_grad_node',
+
+        name='ik_grad_node',
 
         parameters=[
             {
@@ -471,9 +503,10 @@ def generate_launch_description():
         joint_states_completo,
         kinematics,
         ik,
-        ik_jacob,
+        ik_newton,
         ik_des,
         ik_geom,
+        ik_grad,
         control,
         sim,
         teleop,

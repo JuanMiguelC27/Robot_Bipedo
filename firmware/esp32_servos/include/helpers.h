@@ -27,8 +27,9 @@ inline float angleToUs(uint8_t servoId, float angleDeg) {
     // Clamp al rango seguro del servo
     float angle = clampValue(angleDeg, p.angleMin, p.angleMax);
     
-    // Conversión lineal: us = US0 + grados * US_PER_DEG
-    return US0 + angle * US_PER_DEG;
+    // Conversión lineal sobre el ángulo físico del servo:
+    // us = us0 + (comando - servoOffset) * usPerDeg
+    return p.us0 + (angle - p.servoOffset) * p.usPerDeg;
 }
 
 // ============================================================

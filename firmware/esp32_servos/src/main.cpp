@@ -8,6 +8,7 @@
 #include <rcl/error_handling.h>
 #include <rclc/rclc.h>
 #include <rclc/executor.h>
+#include <rmw_microros/rmw_microros.h>
 
 #include <std_msgs/msg/float32_multi_array.h>
 
@@ -21,27 +22,38 @@
 
 // ============================================================
 // Robot Bipedo - Firmware ESP32 con micro-ROS
-// Controla 3 servos RDS51150 via modulo PCA9685 (16 canales PWM, I2C).
+// Controla los servos via modulo PCA9685 (16 canales PWM, I2C).
 //
 // Conexiones:
+//   ESP32 GND        -> PCA9685 GND
+//   ESP32 3.3V       -> PCA9685 VCC  (logica)
 //   ESP32 D21 (SDA)  -> PCA9685 SDA
 //   ESP32 D22 (SCL)  -> PCA9685 SCL
 //   ESP32 D4  (OE)   -> PCA9685 OE   (activo-bajo)
+//   Fuente 5V        -> PCA9685 V+   (potencia de los servos)
+//
 //   Junta 0 -> PCA9685 PWM2 (Hip Roll)
 //   Junta 1 -> PCA9685 PWM1 (Hip Pitch)
-//   Junta 2 -> PCA9685 PWM0 (Knee)
-//   Los servos (RDS51150) se alimentan con fuente 12V independiente.
+//   Junta 2 -> PCA9685 PWM0 (Knee)  <- SG90 de prueba si
+//                                      SERVO_CANAL0_SG90 = 1
 //
 // Suscripcion:  /servo_commands  (std_msgs/Float32MultiArray)
 //   data[0] -> angulo junta 0 (Hip Roll) en grados
 //   data[1] -> angulo junta 1 (Hip Pitch) en grados
 //   data[2] -> angulo junta 2 (Knee) en grados
+//   (mismo sistema que manda teleop_node: q + offset 0/135/135)
 //
 // Publicacion:  /servo_states  (std_msgs/Float32MultiArray)
-//   Posicion actual (grados) de cada servo.
+//   Posicion actual (grados, mismo sistema) de cada servo.
+//
+// Conexion con el agente:
+//   El firmware espera al micro-ROS agent y, si el agente se
+//   cae o se reinicia, se vuelve a conectar solo. Los servos
+//   mantienen su ultima posicion mientras tanto.
+//   LED: parpadeo lento = esperando agente, fijo = conectado.
 // ============================================================
 
-#define RCCHECK(fn) { rcl_ret_t temp_rc = fn; if ((temp_rc != RCL_RET_OK)) { error_loop(); } }
+#define RCCHECK(fn) { rcl_ret_t temp_rc = fn; if ((temp_rc != RCL_RET_OK)) { return false; } }
 #define RCSOFTCHECK(fn) { rcl_ret_t temp_rc = fn; if ((temp_rc != RCL_RET_OK)) {} }
 
 Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver(0x40);
@@ -64,35 +76,30 @@ float state_data[NUM_SERVOS];
 // Objetivos y posiciones actuales para transicion suave
 float target_angle[NUM_SERVOS];
 float current_angle[NUM_SERVOS];
-unsigned long last_move_time = 0;
+uint16_t last_ticks[NUM_SERVOS];
 
-// Antibacklash
-const bool ANTI_BACKLASH = true;
-const float APPROACH_OFFSET_DEG = 3.0f;  // 3 grados de aproximación
-const unsigned long SETTLE_MS = 100;      // Tiempo de asentamiento
+const float STEP_DEG = 0.3f;                 // grados por paso
+const unsigned long STEP_PERIOD_MS = 10;     // 0.3° / 10 ms = 30 °/s
+unsigned long last_step_time = 0;
+
+// Estado de la conexion con el agente
+enum AgentState {
+    WAITING_AGENT,
+    AGENT_AVAILABLE,
+    AGENT_CONNECTED,
+    AGENT_DISCONNECTED
+};
+AgentState agent_state = WAITING_AGENT;
 
 // ============================================================
-// Mueve un servo con antibacklash
+// Escribe un servo en el PCA9685 (solo si cambio el pulso)
 // ============================================================
-void moveServo(uint8_t servoId, float angleDeg) {
-    const ServoParams& p = SERVO_PARAMS[servoId];
-    
-    if (ANTI_BACKLASH) {
-        // Aproximar desde abajo para eliminar juego de engranajes
-        float approachAngle = angleDeg - APPROACH_OFFSET_DEG;
-        if (approachAngle < p.angleMin) approachAngle = p.angleMin;
-        
-        if (approachAngle < angleDeg - 0.5f) {
-            float approachUs = angleToUs(servoId, approachAngle);
-            pwm.setPWM(p.channel, 0, usToTicks(approachUs));
-            delay(SETTLE_MS);
-        }
+void writeServo(uint8_t servoId, float angleDeg) {
+    uint16_t ticks = usToTicks(angleToUs(servoId, angleDeg));
+    if (ticks != last_ticks[servoId]) {
+        pwm.setPWM(SERVO_PARAMS[servoId].channel, 0, ticks);
+        last_ticks[servoId] = ticks;
     }
-    
-    // Mover al objetivo final
-    float targetUs = angleToUs(servoId, angleDeg);
-    pwm.setPWM(p.channel, 0, usToTicks(targetUs));
-    delay(SETTLE_MS);
 }
 
 // ============================================================
@@ -110,7 +117,6 @@ void cmd_callback(const void* msgin) {
         ang = clampValue(ang, SERVO_PARAMS[i].angleMin, SERVO_PARAMS[i].angleMax);
         target_angle[i] = ang;
     }
-    last_move_time = millis();
 }
 
 // ============================================================
@@ -119,20 +125,14 @@ void cmd_callback(const void* msgin) {
 void update_servos() {
     for (int i = 0; i < NUM_SERVOS; i++) {
         float diff = target_angle[i] - current_angle[i];
-        
-        if (fabsf(diff) > 1.0f) {
-            float step = (diff > 0.0f) ? 0.3f : -0.3f;
-            current_angle[i] += step;
-            current_angle[i] = clampValue(current_angle[i], 
-                                          SERVO_PARAMS[i].angleMin, 
-                                          SERVO_PARAMS[i].angleMax);
+
+        if (fabsf(diff) > STEP_DEG) {
+            current_angle[i] += (diff > 0.0f) ? STEP_DEG : -STEP_DEG;
         } else {
             current_angle[i] = target_angle[i];
         }
 
-        // Escribir al canal del PCA9685
-        float us = angleToUs(i, current_angle[i]);
-        pwm.setPWM(SERVO_PARAMS[i].channel, 0, usToTicks(us));
+        writeServo(i, current_angle[i]);
         state_data[i] = current_angle[i];
     }
 }
@@ -143,27 +143,70 @@ void update_servos() {
 void state_timer_callback(rcl_timer_t* timer, int64_t last_call_time) {
     (void)timer;
     (void)last_call_time;
-    if (rcl_publisher_is_valid(&publisher)) {
-        RCSOFTCHECK(rcl_publish(&publisher, &state_msg, NULL));
-    }
+    RCSOFTCHECK(rcl_publish(&publisher, &state_msg, NULL));
 }
 
 // ============================================================
-// Bucle de error
+// Crea nodo, pub/sub, timer y executor (al conectar el agente)
 // ============================================================
-void error_loop(void) {
-    while (1) {
-        digitalWrite(LED_PIN, HIGH);
-        delay(150);
-        digitalWrite(LED_PIN, LOW);
-        delay(150);
-    }
+bool create_entities() {
+    allocator = rcl_get_default_allocator();
+
+    RCCHECK(rclc_support_init(&support, 0, NULL, &allocator));
+    RCCHECK(rclc_node_init_default(&node, "esp32_servo_controller", "", &support));
+
+    cmd_msg.data.data = cmd_data;
+    cmd_msg.data.capacity = NUM_SERVOS;
+    cmd_msg.data.size = 0;
+
+    RCCHECK(rclc_subscription_init_default(
+        &subscription, &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
+        "servo_commands"));
+
+    state_msg.data.data = state_data;
+    state_msg.data.capacity = NUM_SERVOS;
+    state_msg.data.size = NUM_SERVOS;
+
+    RCCHECK(rclc_publisher_init_default(
+        &publisher, &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
+        "servo_states"));
+
+    const unsigned int timer_timeout = 500;
+    RCCHECK(rclc_timer_init_default(
+        &timer, &support, RCL_MS_TO_NS(timer_timeout), state_timer_callback));
+
+    executor = rclc_executor_get_zero_initialized_executor();
+    RCCHECK(rclc_executor_init(&executor, &support.context, 2, &allocator));
+    RCCHECK(rclc_executor_add_subscription(
+        &executor, &subscription, &cmd_msg, &cmd_callback, ON_NEW_DATA));
+    RCCHECK(rclc_executor_add_timer(&executor, &timer));
+
+    return true;
+}
+
+// ============================================================
+// Libera todo (cuando se pierde el agente)
+// ============================================================
+void destroy_entities() {
+    rmw_context_t* rmw_context = rcl_context_get_rmw_context(&support.context);
+    (void)rmw_uros_set_context_entity_destroy_session_timeout(rmw_context, 0);
+
+    RCSOFTCHECK(rcl_publisher_fini(&publisher, &node));
+    RCSOFTCHECK(rcl_subscription_fini(&subscription, &node));
+    RCSOFTCHECK(rcl_timer_fini(&timer));
+    RCSOFTCHECK(rclc_executor_fini(&executor));
+    RCSOFTCHECK(rcl_node_fini(&node));
+    RCSOFTCHECK(rclc_support_fini(&support));
 }
 
 // ============================================================
 // Setup
 // ============================================================
 void setup() {
+    // Los mensajes de texto van ANTES de activar el transporte
+    // micro-ROS: despues el puerto serie es solo del agente.
     Serial.begin(115200);
     delay(300);
     Serial.println("\n[ESP32] Booting biped servo controller...");
@@ -186,63 +229,69 @@ void setup() {
         target_angle[i] = SERVO_PARAMS[i].angleHome;
         current_angle[i] = SERVO_PARAMS[i].angleHome;
         state_data[i] = SERVO_PARAMS[i].angleHome;
-        
-        float us = angleToUs(i, SERVO_PARAMS[i].angleHome);
-        pwm.setPWM(SERVO_PARAMS[i].channel, 0, usToTicks(us));
+        last_ticks[i] = 0xFFFF;  // fuerza la primera escritura
+
+        writeServo(i, SERVO_PARAMS[i].angleHome);
         delay(200);  // Espera entre servos para evitar picos
     }
 
-    Serial.println("[ESP32] PCA9685 initialized");
+    Serial.println("[ESP32] PCA9685 listo. Esperando micro-ROS agent...");
+    Serial.flush();
 
     // Configurar micro-ROS transporte serial (UART0 -> USB)
     set_microros_serial_transports(Serial);
-    Serial.println("[ESP32] micro-ROS serial transport set");
-
-    allocator = rcl_get_default_allocator();
-
-    RCCHECK(rclc_support_init(&support, 0, NULL, &allocator));
-    RCCHECK(rclc_node_init_default(&node, "esp32_servo_controller", "", &support));
-    Serial.println("[ESP32] micro-ROS node created");
-
-    cmd_msg.data.data = cmd_data;
-    cmd_msg.data.capacity = NUM_SERVOS;
-    cmd_msg.data.size = 0;
-
-    RCCHECK(rclc_subscription_init_default(
-        &subscription, &node,
-        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
-        "servo_commands"));
-
-    state_msg.data.data = state_data;
-    state_msg.data.capacity = NUM_SERVOS;
-    state_msg.data.size = NUM_SERVOS;
-
-    RCCHECK(rclc_publisher_init_default(
-        &publisher, &node,
-        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
-        "servo_states"));
-    Serial.println("[ESP32] pub/sub created");
-
-    const unsigned int timer_timeout = 500;
-    RCCHECK(rclc_timer_init_default(
-        &timer, &support, RCL_MS_TO_NS(timer_timeout), state_timer_callback));
-
-    RCCHECK(rclc_executor_init(&executor, &support.context, 2, &allocator));
-    RCCHECK(rclc_executor_add_subscription(
-        &executor, &subscription, &cmd_msg, &cmd_callback, ON_NEW_DATA));
-    RCCHECK(rclc_executor_add_timer(&executor, &timer));
-
-    digitalWrite(LED_PIN, LOW);
-    Serial.println("[ESP32] Setup complete. Waiting for agent...");
 }
 
 // ============================================================
 // Loop
 // ============================================================
 void loop() {
-    if (millis() - last_move_time < 5 || millis() - last_move_time > 20) {
+    // Los servos se actualizan siempre, haya o no agente
+    if (millis() - last_step_time >= STEP_PERIOD_MS) {
+        last_step_time = millis();
         update_servos();
     }
-    rclc_executor_spin_some(&executor, RCL_MS_TO_NS(10));
-    delay(1);
+
+    switch (agent_state) {
+        case WAITING_AGENT: {
+            static unsigned long last_ping = 0;
+            if (millis() - last_ping >= 500) {
+                last_ping = millis();
+                digitalWrite(LED_PIN, !digitalRead(LED_PIN));  // parpadeo lento
+                if (rmw_uros_ping_agent(100, 1) == RMW_RET_OK) {
+                    agent_state = AGENT_AVAILABLE;
+                }
+            }
+            break;
+        }
+
+        case AGENT_AVAILABLE:
+            if (create_entities()) {
+                agent_state = AGENT_CONNECTED;
+                digitalWrite(LED_PIN, HIGH);
+            } else {
+                destroy_entities();
+                agent_state = WAITING_AGENT;
+            }
+            break;
+
+        case AGENT_CONNECTED: {
+            static unsigned long last_check = 0;
+            if (millis() - last_check >= 1000) {
+                last_check = millis();
+                if (rmw_uros_ping_agent(100, 3) != RMW_RET_OK) {
+                    agent_state = AGENT_DISCONNECTED;
+                    break;
+                }
+            }
+            rclc_executor_spin_some(&executor, RCL_MS_TO_NS(5));
+            break;
+        }
+
+        case AGENT_DISCONNECTED:
+            destroy_entities();
+            digitalWrite(LED_PIN, LOW);
+            agent_state = WAITING_AGENT;
+            break;
+    }
 }

@@ -37,9 +37,9 @@ import rclpy
 from rclpy.node import Node
 
 from robot_interfaces.msg import (
-    RobotCommand, JointState, IKResult, IKJacobTarget
+    RobotCommand, JointState, JointTarget, IKResult, IKJacobTarget
 )
-from std_msgs.msg import Float32MultiArray
+from std_msgs.msg import Float32MultiArray, String
 from geometry_msgs.msg import Point
 from visualization_msgs.msg import Marker
 
@@ -64,8 +64,8 @@ from robot_kinematics.kinem_invers_leg_algebraico_izq import (
     cinematica_inversa_pata_alg
 )
 
-from robot_kinematics.kinem_invers_leg_jacob import (
-    cinematica_inversa_pata_jacob
+from robot_kinematics.kinem_invers_leg_Newton_izq import (
+    cinematica_inversa_pata_newton
 )
 
 from robot_kinematics.kinem_invers_leg_mth_desacople_izq import (
@@ -74,6 +74,10 @@ from robot_kinematics.kinem_invers_leg_mth_desacople_izq import (
 
 from robot_kinematics.kinem_invers_leg_Geometrico_izq import (
     cinematica_inversa_pata_geom
+)
+
+from robot_kinematics.kinem_invers_leg_gradiente_descendente import (
+    cinematica_inversa_pata_grad
 )
 
 
@@ -252,14 +256,11 @@ class TeleopNode(Node):
 
 
         # ----------------------------------------------------
-        # OFFSETS DE LOS SERVOS REVISAR
+        # Los offsets de los servos ya NO están acá: el
+        # hardware se comanda en ángulo cinemático por
+        # /robot/hardware_command y control_node suma el
+        # offset (parámetro servo_offset_deg).
         # ----------------------------------------------------
-
-        self.servo_offset_deg = [
-            0,    # Hip Roll
-            135.0,    # Hip Pitch
-            135.0     # Knee
-        ]
 
 
         # ====================================================
@@ -281,10 +282,10 @@ class TeleopNode(Node):
 
         # ----------------------------------------------------
         # ÁNGULO REAL DEL SERVO (feedback desde el ESP32,
-        # tópico /servo_states). Se guarda ya convertido al
-        # mismo sistema de grados que usan los sliders (se le
-        # resta el offset de servo) para poder comparar
-        # "comandado" vs "real" de forma directa.
+        # convertido por control_node a /robot/hardware_state).
+        # Llega en el mismo sistema de grados que usan los
+        # sliders, para comparar "comandado" vs "real" de
+        # forma directa.
         # ----------------------------------------------------
 
         self.real_deg = [
@@ -320,14 +321,33 @@ class TeleopNode(Node):
         )
 
 
-        # Publicador utilizado para enviar los ángulos
-        # a los servos en grados.
+        # Publicador para mandar la pose a los motores reales.
+        # NO va directo al ESP32: control_node la verifica
+        # (e-stop y límites), le suma el offset de cada servo
+        # y recién ahí publica /servo_commands.
 
-        self.servo_pub = self.create_publisher(
-            Float32MultiArray,
-            '/servo_commands',
+        self.hardware_pub = self.create_publisher(
+            JointTarget,
+            '/robot/hardware_command',
             10
         )
+
+
+        # Respuesta de control_node a cada comando de hardware
+        # ("OK|..." o "RECHAZADO|..."). Se guarda acá (hilo de
+        # ROS) y se muestra en refresh() (hilo de Tkinter), en
+        # la pestaña desde la que se apretó el botón.
+
+        self.hardware_status_sub = self.create_subscription(
+            String,
+            '/robot/hardware_status',
+            self.on_hardware_status,
+            10
+        )
+
+        self.pending_hardware_status = None
+
+        self.hardware_status_setter = None
 
 
         # ====================================================
@@ -342,12 +362,13 @@ class TeleopNode(Node):
         )
 
 
-        # Estado real de los servos, publicado por el firmware
-        # del ESP32 (ver firmware/esp32_servos/src/main.cpp).
+        # Estado real de los servos (firmware del ESP32,
+        # /servo_states), ya convertido a grados cinemáticos
+        # por control_node.
 
         self.servo_state_sub = self.create_subscription(
             Float32MultiArray,
-            '/servo_states',
+            '/robot/hardware_state',
             self.on_servo_state,
             10
         )
@@ -379,7 +400,7 @@ class TeleopNode(Node):
 
         # ----------------------------------------------------
         # Trayectorias desde archivo, una por pestaña de IK
-        # ('alg', 'jacob', 'des', 'geom'). Cada entrada guarda sus
+        # ('alg', 'newton', 'des', 'geom', 'grad'). Cada entrada guarda sus
         # widgets (los llena build_trajectory_frame), la lista
         # de puntos (x, y, z) en mm a visitar, el índice del
         # punto actual, si está corriendo, y el id del
@@ -393,7 +414,7 @@ class TeleopNode(Node):
         # RASTRO DEL RECORRIDO (verificación visual en RViz)
         #
         # Cada vez que un objetivo de cinemática inversa es
-        # alcanzable y se aplica (en cualquiera de las 4
+        # alcanzable y se aplica (en cualquiera de las 5
         # pestañas de IK), se agrega el punto a esta lista y se
         # publica como un Marker tipo LINE_STRIP, en el mismo
         # frame que usa la cinemática (Base_link), para poder
@@ -410,24 +431,24 @@ class TeleopNode(Node):
 
 
         # ====================================================
-        # CINEMÁTICA INVERSA - MÉTODO DEL JACOBIANO
-        # (vía ik_jacob_node, por tópicos)
+        # CINEMÁTICA INVERSA - MÉTODO DE NEWTON-RAPHSON
+        # (vía ik_newton_node, por tópicos)
         # ====================================================
 
-        self.ik_jacob_target_pub = self.create_publisher(
+        self.ik_newton_target_pub = self.create_publisher(
             IKJacobTarget,
-            '/robot/ik_jacob_target',
+            '/robot/ik_newton_target',
             10
         )
 
-        self.ik_jacob_result_sub = self.create_subscription(
+        self.ik_newton_result_sub = self.create_subscription(
             IKResult,
-            '/robot/ik_jacob_result',
-            self.on_ik_jacob_result,
+            '/robot/ik_newton_result',
+            self.on_ik_newton_result,
             10
         )
 
-        self.pending_ik_jacob_result = None
+        self.pending_ik_newton_result = None
 
 
         # ====================================================
@@ -473,6 +494,28 @@ class TeleopNode(Node):
 
 
         # ====================================================
+        # CINEMÁTICA INVERSA - GRADIENTE DESCENDENTE
+        # (vía ik_grad_node, por tópicos; usa semilla igual
+        # que Newton)
+        # ====================================================
+
+        self.ik_grad_target_pub = self.create_publisher(
+            IKJacobTarget,
+            '/robot/ik_grad_target',
+            10
+        )
+
+        self.ik_grad_result_sub = self.create_subscription(
+            IKResult,
+            '/robot/ik_grad_result',
+            self.on_ik_grad_result,
+            10
+        )
+
+        self.pending_ik_grad_result = None
+
+
+        # ====================================================
         # VERIFICACIÓN MTH (matriz de transformación homogénea)
         #
         # No usa tópicos: es un cálculo cerrado (sin iteraciones)
@@ -484,9 +527,10 @@ class TeleopNode(Node):
         # ====================================================
 
         self.last_ik_target = None
-        self.last_ik_jacob_target = None
+        self.last_ik_newton_target = None
         self.last_ik_des_target = None
         self.last_ik_geom_target = None
+        self.last_ik_grad_target = None
 
 
         # ====================================================
@@ -504,7 +548,7 @@ class TeleopNode(Node):
         # Tamaño inicial de la ventana
         # ----------------------------------------------------
 
-        self.root.geometry("980x740")
+        self.root.geometry("980x810")
 
         self.root.resizable(
             False,
@@ -532,6 +576,12 @@ class TeleopNode(Node):
         style.configure(
             'Subtitle.TLabel',
             font=('Arial', 11)
+        )
+
+        style.configure(
+            'Method.TLabel',
+            font=('Arial', 14, 'bold'),
+            foreground='#1f4e79'
         )
 
         style.configure(
@@ -604,7 +654,7 @@ class TeleopNode(Node):
             padding=8
         )
 
-        tab_ik_jacob = ttk.Frame(
+        tab_ik_newton = ttk.Frame(
             notebook,
             padding=8
         )
@@ -619,6 +669,11 @@ class TeleopNode(Node):
             padding=8
         )
 
+        tab_ik_grad = ttk.Frame(
+            notebook,
+            padding=8
+        )
+
         notebook.add(
             tab_fk,
             text="Cinemática directa"
@@ -626,22 +681,49 @@ class TeleopNode(Node):
 
         notebook.add(
             tab_ik,
-            text="Cinemática inversa"
+            text="CI Algebraico"
         )
 
         notebook.add(
-            tab_ik_jacob,
-            text="Cinemática inversa (Jacobiano)"
+            tab_ik_newton,
+            text="CI Newton"
         )
 
         notebook.add(
             tab_ik_des,
-            text="Cinemática inversa (Desacople)"
+            text="CI Desacople"
         )
 
         notebook.add(
             tab_ik_geom,
-            text="Cinemática inversa (Geométrico)"
+            text="CI Geométrico"
+        )
+
+        notebook.add(
+            tab_ik_grad,
+            text="CI Gradiente descendente"
+        )
+
+
+        # ----------------------------------------------------
+        # El título de la ventana muestra el método de la
+        # pestaña activa, para diferenciarlas mejor.
+        # ----------------------------------------------------
+
+        self.tab_titles = {
+            str(tab_fk): "Cinemática directa",
+            str(tab_ik): "Cinemática inversa - Método algebraico",
+            str(tab_ik_newton): "Cinemática inversa - Método de Newton-Raphson",
+            str(tab_ik_des): "Cinemática inversa - Método por desacople",
+            str(tab_ik_geom): "Cinemática inversa - Método geométrico",
+            str(tab_ik_grad): (
+                "Cinemática inversa - Método de gradiente descendente"
+            ),
+        }
+
+        notebook.bind(
+            '<<NotebookTabChanged>>',
+            lambda event: self.on_tab_changed(event.widget)
         )
 
 
@@ -1084,6 +1166,11 @@ class TeleopNode(Node):
         # PESTAÑA DE CINEMÁTICA INVERSA
         # ====================================================
 
+        self.build_method_header(
+            tab_ik,
+            self.tab_titles[str(tab_ik)]
+        )
+
         ik_coords_frame = ttk.LabelFrame(
             tab_ik,
             text="Coordenada objetivo (mm)",
@@ -1218,7 +1305,7 @@ class TeleopNode(Node):
         # ----------------------------------------------------
         # APLICAR A HARDWARE (ESP32 real)
         #
-        # Envía por /servo_commands la última consigna calculada
+        # Envía a los motores (vía control_node) la última consigna calculada
         # (self.target_deg, ya sincronizada con el resultado de
         # esta pestaña). La previsualización en RViz ya ocurre
         # sola al calcular, por /robot/command.
@@ -1274,27 +1361,32 @@ class TeleopNode(Node):
 
 
         # ====================================================
-        # PESTAÑA DE CINEMÁTICA INVERSA (JACOBIANO)
+        # PESTAÑA DE CINEMÁTICA INVERSA (NEWTON)
         # ====================================================
 
-        ikj_coords_frame = ttk.LabelFrame(
-            tab_ik_jacob,
+        self.build_method_header(
+            tab_ik_newton,
+            self.tab_titles[str(tab_ik_newton)]
+        )
+
+        ikn_coords_frame = ttk.LabelFrame(
+            tab_ik_newton,
             text="Coordenada objetivo (mm)",
             padding=8,
             style='Section.TLabelframe'
         )
 
-        ikj_coords_frame.pack(
+        ikn_coords_frame.pack(
             fill='x',
             pady=(0, 8)
         )
 
-        self.ikj_entries = {}
+        self.ikn_entries = {}
 
         for i, axis in enumerate(('X', 'Y', 'Z')):
 
             label = ttk.Label(
-                ikj_coords_frame,
+                ikn_coords_frame,
                 text=f"{axis}:"
             )
 
@@ -1306,7 +1398,7 @@ class TeleopNode(Node):
             )
 
             entry = tk.Entry(
-                ikj_coords_frame,
+                ikn_coords_frame,
                 width=8,
                 justify='center'
             )
@@ -1323,27 +1415,33 @@ class TeleopNode(Node):
                 pady=5
             )
 
-            self.ikj_entries[axis] = entry
+            self.ikn_entries[axis] = entry
 
-        ikj_send_button = ttk.Button(
-            tab_ik_jacob,
+        ikn_send_button = ttk.Button(
+            ikn_coords_frame,
             text="Calcular y enviar",
-            command=self.send_ik_jacob_target
+            command=self.send_ik_newton_target
         )
 
-        ikj_send_button.pack(
-            pady=(0, 4)
+        ikn_send_button.grid(
+            row=1,
+            column=0,
+            columnspan=3,
+            pady=(5, 0)
         )
 
-        ikj_home_button = tk.Button(
-            tab_ik_jacob,
+        ikn_home_button = tk.Button(
+            ikn_coords_frame,
             text="Home",
             bg='#ffdddd',
-            command=self.go_home_jacob
+            command=self.go_home_newton
         )
 
-        ikj_home_button.pack(
-            pady=(0, 8)
+        ikn_home_button.grid(
+            row=1,
+            column=3,
+            columnspan=3,
+            pady=(5, 0)
         )
 
 
@@ -1351,26 +1449,26 @@ class TeleopNode(Node):
         # RESULTADO (q1, q2, q3)
         # ----------------------------------------------------
 
-        ikj_result_frame = ttk.LabelFrame(
-            tab_ik_jacob,
+        ikn_result_frame = ttk.LabelFrame(
+            tab_ik_newton,
             text="Resultado",
             padding=8,
             style='Section.TLabelframe'
         )
 
-        ikj_result_frame.pack(
+        ikn_result_frame.pack(
             fill='x',
             pady=(0, 8)
         )
 
-        self.ikj_q_labels = []
+        self.ikn_q_labels = []
 
         for i, name in enumerate(
             ('q1 (Hip Roll)', 'q2 (Hip Pitch)', 'q3 (Knee)')
         ):
 
             label = ttk.Label(
-                ikj_result_frame,
+                ikn_result_frame,
                 text=f"{name}:",
                 width=16
             )
@@ -1384,7 +1482,7 @@ class TeleopNode(Node):
             )
 
             value_label = ttk.Label(
-                ikj_result_frame,
+                ikn_result_frame,
                 text="--",
                 width=10
             )
@@ -1397,7 +1495,7 @@ class TeleopNode(Node):
                 sticky='w'
             )
 
-            self.ikj_q_labels.append(
+            self.ikn_q_labels.append(
                 value_label
             )
 
@@ -1406,14 +1504,14 @@ class TeleopNode(Node):
         # APLICAR A HARDWARE (ESP32 real)
         # ----------------------------------------------------
 
-        ikj_hardware_button = tk.Button(
-            tab_ik_jacob,
+        ikn_hardware_button = tk.Button(
+            tab_ik_newton,
             text="Aplicar a motores (HARDWARE)",
             bg='#ffdddd',
-            command=lambda: self.apply_to_hardware(self.set_ik_jacob_status)
+            command=lambda: self.apply_to_hardware(self.set_ik_newton_status)
         )
 
-        ikj_hardware_button.pack(
+        ikn_hardware_button.pack(
             pady=(0, 8)
         )
 
@@ -1423,11 +1521,11 @@ class TeleopNode(Node):
         # ----------------------------------------------------
 
         self.build_trajectory_frame(
-            tab_ik_jacob,
-            'jacob',
-            self.ikj_entries,
-            self.send_ik_jacob_target,
-            self.set_ik_jacob_status
+            tab_ik_newton,
+            'newton',
+            self.ikn_entries,
+            self.send_ik_newton_target,
+            self.set_ik_newton_status
         )
 
 
@@ -1435,22 +1533,22 @@ class TeleopNode(Node):
         # VERIFICACIÓN MTH DEL RESULTADO
         # ----------------------------------------------------
 
-        self.ikj_mth = self.build_mth_verification(tab_ik_jacob)
+        self.ikn_mth = self.build_mth_verification(tab_ik_newton)
 
 
         # ----------------------------------------------------
-        # MENSAJE DE ESTADO (pestaña Jacobiano)
+        # MENSAJE DE ESTADO (pestaña Newton)
         # ----------------------------------------------------
 
-        self.ikj_status_label = tk.Label(
-            tab_ik_jacob,
+        self.ikn_status_label = tk.Label(
+            tab_ik_newton,
             text="Ingrese objetivo y semilla, luego \"Calcular y enviar\".",
             font=('Arial', 10, 'bold'),
             wraplength=380,
             justify='center'
         )
 
-        self.ikj_status_label.pack(
+        self.ikn_status_label.pack(
             pady=(5, 0)
         )
 
@@ -1458,6 +1556,11 @@ class TeleopNode(Node):
         # ====================================================
         # PESTAÑA DE CINEMÁTICA INVERSA (DESACOPLE)
         # ====================================================
+
+        self.build_method_header(
+            tab_ik_des,
+            self.tab_titles[str(tab_ik_des)]
+        )
 
         ikd_coords_frame = ttk.LabelFrame(
             tab_ik_des,
@@ -1647,6 +1750,11 @@ class TeleopNode(Node):
         # PESTAÑA DE CINEMÁTICA INVERSA (GEOMÉTRICO)
         # ====================================================
 
+        self.build_method_header(
+            tab_ik_geom,
+            self.tab_titles[str(tab_ik_geom)]
+        )
+
         ikg_coords_frame = ttk.LabelFrame(
             tab_ik_geom,
             text="Coordenada objetivo (mm)",
@@ -1827,6 +1935,199 @@ class TeleopNode(Node):
         )
 
         self.ikg_status_label.pack(
+            pady=(5, 0)
+        )
+
+
+        # ====================================================
+        # PESTAÑA DE CINEMÁTICA INVERSA (GRADIENTE DESCENDENTE)
+        # ====================================================
+
+        self.build_method_header(
+            tab_ik_grad,
+            self.tab_titles[str(tab_ik_grad)]
+        )
+
+        ikgr_coords_frame = ttk.LabelFrame(
+            tab_ik_grad,
+            text="Coordenada objetivo (mm)",
+            padding=8,
+            style='Section.TLabelframe'
+        )
+
+        ikgr_coords_frame.pack(
+            fill='x',
+            pady=(0, 8)
+        )
+
+        self.ikgr_entries = {}
+
+        for i, axis in enumerate(('X', 'Y', 'Z')):
+
+            label = ttk.Label(
+                ikgr_coords_frame,
+                text=f"{axis}:"
+            )
+
+            label.grid(
+                row=0,
+                column=i * 2,
+                padx=(5, 3),
+                pady=5
+            )
+
+            entry = tk.Entry(
+                ikgr_coords_frame,
+                width=8,
+                justify='center'
+            )
+
+            entry.insert(
+                0,
+                "0.0"
+            )
+
+            entry.grid(
+                row=0,
+                column=i * 2 + 1,
+                padx=(0, 10),
+                pady=5
+            )
+
+            self.ikgr_entries[axis] = entry
+
+        ikgr_send_button = ttk.Button(
+            ikgr_coords_frame,
+            text="Calcular y enviar",
+            command=self.send_ik_grad_target
+        )
+
+        ikgr_send_button.grid(
+            row=1,
+            column=0,
+            columnspan=3,
+            pady=(5, 0)
+        )
+
+        ikgr_home_button = tk.Button(
+            ikgr_coords_frame,
+            text="Home",
+            bg='#ffdddd',
+            command=self.go_home_grad
+        )
+
+        ikgr_home_button.grid(
+            row=1,
+            column=3,
+            columnspan=3,
+            pady=(5, 0)
+        )
+
+
+        # ----------------------------------------------------
+        # RESULTADO (q1, q2, q3)
+        # ----------------------------------------------------
+
+        ikgr_result_frame = ttk.LabelFrame(
+            tab_ik_grad,
+            text="Resultado",
+            padding=8,
+            style='Section.TLabelframe'
+        )
+
+        ikgr_result_frame.pack(
+            fill='x',
+            pady=(0, 8)
+        )
+
+        self.ikgr_q_labels = []
+
+        for i, name in enumerate(
+            ('q1 (Hip Roll)', 'q2 (Hip Pitch)', 'q3 (Knee)')
+        ):
+
+            label = ttk.Label(
+                ikgr_result_frame,
+                text=f"{name}:",
+                width=16
+            )
+
+            label.grid(
+                row=i,
+                column=0,
+                padx=(5, 5),
+                pady=3,
+                sticky='w'
+            )
+
+            value_label = ttk.Label(
+                ikgr_result_frame,
+                text="--",
+                width=10
+            )
+
+            value_label.grid(
+                row=i,
+                column=1,
+                padx=(0, 5),
+                pady=3,
+                sticky='w'
+            )
+
+            self.ikgr_q_labels.append(
+                value_label
+            )
+
+
+        # ----------------------------------------------------
+        # APLICAR A HARDWARE (ESP32 real)
+        # ----------------------------------------------------
+
+        ikgr_hardware_button = tk.Button(
+            tab_ik_grad,
+            text="Aplicar a motores (HARDWARE)",
+            bg='#ffdddd',
+            command=lambda: self.apply_to_hardware(self.set_ik_grad_status)
+        )
+
+        ikgr_hardware_button.pack(
+            pady=(0, 8)
+        )
+
+
+        # ----------------------------------------------------
+        # TRAYECTORIA DESDE ARCHIVO (trayectoria.txt)
+        # ----------------------------------------------------
+
+        self.build_trajectory_frame(
+            tab_ik_grad,
+            'grad',
+            self.ikgr_entries,
+            self.send_ik_grad_target,
+            self.set_ik_grad_status
+        )
+
+
+        # ----------------------------------------------------
+        # VERIFICACIÓN MTH DEL RESULTADO
+        # ----------------------------------------------------
+
+        self.ikgr_mth = self.build_mth_verification(tab_ik_grad)
+
+
+        # ----------------------------------------------------
+        # MENSAJE DE ESTADO (pestaña Gradiente descendente)
+        # ----------------------------------------------------
+
+        self.ikgr_status_label = tk.Label(
+            tab_ik_grad,
+            text="Ingrese una coordenada y presione \"Calcular y enviar\".",
+            font=('Arial', 10, 'bold'),
+            wraplength=380,
+            justify='center'
+        )
+
+        self.ikgr_status_label.pack(
             pady=(5, 0)
         )
 
@@ -2059,43 +2360,133 @@ class TeleopNode(Node):
 
 
     # ========================================================
-    # APLICAR A HARDWARE (ESP32 real, vía /servo_commands)
+    # APLICAR A HARDWARE (ESP32 real, vía control_node)
     # ========================================================
 
-    def apply_to_hardware(self, set_status=None):
+    def apply_to_hardware(self, set_status=None, on_rejected=None):
 
         # Envía al hardware real la última consigna calculada,
         # sea por los sliders (Cinemática directa) o por el
-        # resultado de cualquiera de las 3 pestañas de cinemática
+        # resultado de cualquiera de las pestañas de cinemática
         # inversa: todas actualizan self.target_deg al llegar.
         #
         # set_status permite avisar en la pestaña desde la que se
         # apretó el botón (si no se pasa, se usa la de Cinemática
         # directa, por compatibilidad con el botón original).
+        #
+        # on_rejected (opcional) se llama si el comando no se
+        # envía, acá o en control_node (la usa la trayectoria
+        # para detenerse).
+        #
+        # Devuelve False si la interfaz lo rechazó sin enviarlo.
 
         if set_status is None:
             set_status = self.set_status
 
-        servo_msg = Float32MultiArray()
 
-        servo_msg.data = [
-            float(
-                self.target_deg[i]
-                + self.servo_offset_deg[i]
-            )
-            for i in range(
-                self.num_joints
+        # ----------------------------------------------------
+        # 1. LÍMITE DE LA INTERFAZ (lower_deg / upper_deg)
+        #
+        # Primera barrera: si la consigna se sale del rango de
+        # la interfaz (puede pasar con resultados de IK), no se
+        # envía nada. control_node vuelve a verificar con sus
+        # propios límites antes de publicar /servo_commands.
+        # ----------------------------------------------------
+
+        tol = 1e-6
+
+        fuera = [
+            f"{self.joint_names[i]}={self.target_deg[i]:.1f}° "
+            f"({self.lower_deg[i]:.0f}° a {self.upper_deg[i]:.0f}°)"
+            for i in range(self.num_joints)
+            if not (
+                self.lower_deg[i] - tol
+                <= self.target_deg[i]
+                <= self.upper_deg[i] + tol
             )
         ]
 
-        self.servo_pub.publish(
-            servo_msg
+        if fuera:
+
+            set_status(
+                "✗ No se envió a los motores, fuera de rango: "
+                + ", ".join(fuera),
+                "red"
+            )
+
+            if on_rejected is not None:
+                on_rejected()
+
+            return False
+
+
+        # ----------------------------------------------------
+        # 2. ENVIAR A control_node (radianes, ángulo cinemático)
+        # ----------------------------------------------------
+
+        hw_msg = JointTarget()
+
+        hw_msg.position = [
+            math.radians(self.target_deg[i])
+            for i in range(self.num_joints)
+        ]
+
+        hw_msg.velocity = [0.0] * self.num_joints
+
+        self.hardware_status_setter = (set_status, on_rejected)
+
+        self.hardware_pub.publish(
+            hw_msg
         )
 
         set_status(
-            "✓ Enviado al motor real (última consigna calculada).",
-            "green"
+            "Enviado a control_node, esperando confirmación...",
+            "gray"
         )
+
+        return True
+
+
+    # ========================================================
+    # RESPUESTA DE control_node AL COMANDO DE HARDWARE
+    # (hilo de ROS; solo guarda el dato, ver refresh())
+    # ========================================================
+
+    def on_hardware_status(self, msg):
+
+        self.pending_hardware_status = msg.data
+
+
+    # ========================================================
+    # MOSTRAR LA RESPUESTA DE HARDWARE
+    # (hilo de Tkinter, llamado desde refresh())
+    # ========================================================
+
+    def show_hardware_status(self, data):
+
+        if self.hardware_status_setter is None:
+            return
+
+        set_status, on_rejected = self.hardware_status_setter
+
+        estado, _, texto = data.partition('|')
+
+        if estado == 'OK':
+
+            set_status(
+                f"✓ {texto}",
+                "green"
+            )
+
+        else:
+
+            set_status(
+                f"✗ control_node rechazó el comando: {texto}",
+                "red"
+            )
+
+            if on_rejected is not None:
+                on_rejected()
 
 
     # ========================================================
@@ -2270,10 +2661,12 @@ class TeleopNode(Node):
     # TRAYECTORIA DESDE ARCHIVO - VALIDAR TODOS LOS PUNTOS
     #
     # Resuelve cada punto con el mismo método de la pestaña.
-    # Para el Jacobiano se encadena la semilla igual que en la
+    # Para Newton y el gradiente se encadena la semilla igual que en la
     # ejecución real: se parte de la pose actual y cada punto
     # usa como semilla la solución del anterior. Devuelve el
-    # primer punto sin solución, o None si todos la tienen.
+    # primer punto sin solución o con ángulos fuera de los
+    # límites articulares (con el motivo), o None si todos
+    # están bien.
     # ========================================================
 
     def _first_unreachable_point(self, key, points):
@@ -2282,8 +2675,8 @@ class TeleopNode(Node):
 
         for line_number, x, y, z in points:
 
-            if key == 'jacob':
-                q1, q2, q3, ok = cinematica_inversa_pata_jacob(
+            if key == 'newton':
+                q1, q2, q3, ok = cinematica_inversa_pata_newton(
                     x, y, z, *seed_deg
                 )
             elif key == 'des':
@@ -2292,15 +2685,27 @@ class TeleopNode(Node):
                 q1, q2, q3, ok = cinematica_inversa_pata_geom(
                     x, y, z, L1, L2, L3, L4, L5, L6
                 )
+            elif key == 'grad':
+                q1, q2, q3, ok = cinematica_inversa_pata_grad(
+                    x, y, z, *seed_deg
+                )
             else:
                 q1, q2, q3, ok = cinematica_inversa_pata_alg(
                     x, y, z, L1, L2, L3, L4, L5, L6
                 )
 
             if not ok:
-                return line_number, x, y, z
+                return line_number, x, y, z, "no alcanzable"
 
             seed_deg = [math.degrees(q) for q in (q1, q2, q3)]
+
+            fuera = self.ik_limit_violations(seed_deg)
+
+            if fuera:
+                return (
+                    line_number, x, y, z,
+                    "fuera de límites: " + ", ".join(fuera)
+                )
 
         return None
 
@@ -2368,11 +2773,11 @@ class TeleopNode(Node):
 
         if unreachable is not None:
 
-            line_number, x, y, z = unreachable
+            line_number, x, y, z, motivo = unreachable
 
             set_status(
                 f"✗ Línea {line_number}: ({x:.1f}, {y:.1f}, "
-                f"{z:.1f}) no alcanzable. No se ejecutó.",
+                f"{z:.1f}) {motivo}. No se ejecutó.",
                 "red"
             )
 
@@ -2498,7 +2903,25 @@ class TeleopNode(Node):
             return False
 
         if traj['hardware_var'].get():
-            self.apply_to_hardware(lambda *_: None)
+
+            # Solo se muestran los errores, para no pisar el
+            # mensaje de progreso. Si un punto se rechaza (en
+            # la interfaz o en control_node), se detiene la
+            # trayectoria: los motores no deben saltarse puntos.
+
+            def solo_errores(message, color):
+                if color == 'red':
+                    traj['set_status'](message, color)
+
+            def detener():
+                self.stop_file_trajectory(key)
+                solo_errores(
+                    "✗ Trayectoria detenida: un punto no se pudo "
+                    "enviar a los motores.",
+                    'red'
+                )
+
+            self.apply_to_hardware(solo_errores, detener)
 
         return True
 
@@ -2607,7 +3030,7 @@ class TeleopNode(Node):
         if not result.reachable:
 
             for label in self.ik_q_labels:
-                label.config(text="--")
+                label.config(text="--", foreground='')
 
             self.set_ik_status(
                 "✗ Posición no alcanzable.",
@@ -2620,8 +3043,7 @@ class TeleopNode(Node):
 
         q_deg = [math.degrees(q) for q in result.position]
 
-        for label, value in zip(self.ik_q_labels, q_deg):
-            label.config(text=f"{value:.2f}°")
+        self.show_ik_q_labels(self.ik_q_labels, q_deg)
 
 
         # ----------------------------------------------------
@@ -2668,15 +3090,78 @@ class TeleopNode(Node):
         if self._on_trajectory_ik_result('alg'):
             return
 
-        self.set_ik_status(
-            "✓ Movimiento realizado.",
-            "green"
-        )
+        self.show_ik_done_status(self.set_ik_status, q_deg)
 
 
     # ========================================================
     # CINEMÁTICA INVERSA - MENSAJE DE ESTADO
     # ========================================================
+
+    # ========================================================
+    # CINEMÁTICA INVERSA - LÍMITES ARTICULARES DEL RESULTADO
+    #
+    # Los métodos de IK devuelven la solución exacta aunque se
+    # salga de lower_deg/upper_deg (solo avisan en el log del
+    # nodo). control_node la recorta para RViz, así que el
+    # modelo queda en el límite y el pie NO llega al objetivo.
+    # Estas funciones lo hacen visible en todas las pestañas.
+    # ========================================================
+
+    def ik_limit_violations(self, q_deg):
+
+        tol = 1e-6
+
+        return [
+            f"q{i + 1}={q_deg[i]:.1f}° "
+            f"({self.lower_deg[i]:.0f}° a {self.upper_deg[i]:.0f}°)"
+            for i in range(min(self.num_joints, len(q_deg)))
+            if not (
+                self.lower_deg[i] - tol
+                <= q_deg[i]
+                <= self.upper_deg[i] + tol
+            )
+        ]
+
+
+    def show_ik_q_labels(self, labels, q_deg):
+
+        # Ángulo fuera de rango -> en rojo.
+
+        for i, (label, value) in enumerate(zip(labels, q_deg)):
+
+            fuera = not (
+                self.lower_deg[i] - 1e-6
+                <= value
+                <= self.upper_deg[i] + 1e-6
+            )
+
+            label.config(
+                text=f"{value:.2f}°" + ("  ⚠" if fuera else ""),
+                foreground='red' if fuera else ''
+            )
+
+
+    def show_ik_done_status(self, set_status, q_deg):
+
+        fuera = self.ik_limit_violations(q_deg)
+
+        if fuera:
+
+            set_status(
+                "⚠ Solución fuera de los límites articulares: "
+                + ", ".join(fuera)
+                + ". RViz la muestra recortada al límite (el pie "
+                "no llega al objetivo) y no se enviará a los motores.",
+                "dark orange"
+            )
+
+        else:
+
+            set_status(
+                "✓ Movimiento realizado.",
+                "green"
+            )
+
 
     def set_ik_status(self, message, color):
 
@@ -2687,26 +3172,26 @@ class TeleopNode(Node):
 
 
     # ========================================================
-    # CINEMÁTICA INVERSA (JACOBIANO) - ENVIAR OBJETIVO
+    # CINEMÁTICA INVERSA (NEWTON) - ENVIAR OBJETIVO
     # ========================================================
 
-    def send_ik_jacob_target(self):
+    def send_ik_newton_target(self):
 
         try:
-            x = float(self.ikj_entries['X'].get())
-            y = float(self.ikj_entries['Y'].get())
-            z = float(self.ikj_entries['Z'].get())
+            x = float(self.ikn_entries['X'].get())
+            y = float(self.ikn_entries['Y'].get())
+            z = float(self.ikn_entries['Z'].get())
 
         except ValueError:
 
-            self.set_ik_jacob_status(
+            self.set_ik_newton_status(
                 "Error: X, Y, Z deben ser valores numéricos.",
                 "red"
             )
 
             return
 
-        self.last_ik_jacob_target = (x, y, z)
+        self.last_ik_newton_target = (x, y, z)
 
         # La semilla no se pide al usuario: se toma la pose
         # articular actual (self.target_deg), que es la misma
@@ -2720,67 +3205,66 @@ class TeleopNode(Node):
         target.q2_seed = self.target_deg[1]
         target.q3_seed = self.target_deg[2]
 
-        self.ik_jacob_target_pub.publish(target)
+        self.ik_newton_target_pub.publish(target)
 
-        self.set_ik_jacob_status(
+        self.set_ik_newton_status(
             "Calculando...",
             "gray"
         )
 
 
     # ========================================================
-    # CINEMÁTICA INVERSA (JACOBIANO) - IR A HOME
+    # CINEMÁTICA INVERSA (NEWTON) - IR A HOME
     # ========================================================
 
-    def go_home_jacob(self):
+    def go_home_newton(self):
 
-        self.ikj_entries['X'].delete(0, tk.END)
-        self.ikj_entries['X'].insert(0, f"{HOME_X}")
+        self.ikn_entries['X'].delete(0, tk.END)
+        self.ikn_entries['X'].insert(0, f"{HOME_X}")
 
-        self.ikj_entries['Y'].delete(0, tk.END)
-        self.ikj_entries['Y'].insert(0, f"{HOME_Y}")
+        self.ikn_entries['Y'].delete(0, tk.END)
+        self.ikn_entries['Y'].insert(0, f"{HOME_Y}")
 
-        self.ikj_entries['Z'].delete(0, tk.END)
-        self.ikj_entries['Z'].insert(0, f"{HOME_Z}")
+        self.ikn_entries['Z'].delete(0, tk.END)
+        self.ikn_entries['Z'].insert(0, f"{HOME_Z}")
 
-        self.send_ik_jacob_target()
+        self.send_ik_newton_target()
 
 
     # ========================================================
-    # CINEMÁTICA INVERSA (JACOBIANO) - RECEPCIÓN DEL RESULTADO
+    # CINEMÁTICA INVERSA (NEWTON) - RECEPCIÓN DEL RESULTADO
     # (hilo de ROS; solo guarda el dato, ver refresh())
     # ========================================================
 
-    def on_ik_jacob_result(self, msg):
+    def on_ik_newton_result(self, msg):
 
-        self.pending_ik_jacob_result = msg
+        self.pending_ik_newton_result = msg
 
 
     # ========================================================
-    # CINEMÁTICA INVERSA (JACOBIANO) - APLICAR RESULTADO
+    # CINEMÁTICA INVERSA (NEWTON) - APLICAR RESULTADO
     # (hilo de Tkinter, llamado desde refresh())
     # ========================================================
 
-    def apply_ik_jacob_result(self, result):
+    def apply_ik_newton_result(self, result):
 
         if not result.reachable:
 
-            for label in self.ikj_q_labels:
-                label.config(text="--")
+            for label in self.ikn_q_labels:
+                label.config(text="--", foreground='')
 
-            self.set_ik_jacob_status(
+            self.set_ik_newton_status(
                 "✗ No convergió / posición no alcanzable.",
                 "red"
             )
 
-            self.reset_mth_verification(self.ikj_mth)
+            self.reset_mth_verification(self.ikn_mth)
 
             return
 
         q_deg = [math.degrees(q) for q in result.position]
 
-        for label, value in zip(self.ikj_q_labels, q_deg):
-            label.config(text=f"{value:.2f}°")
+        self.show_ik_q_labels(self.ikn_q_labels, q_deg)
 
 
         # ----------------------------------------------------
@@ -2814,31 +3298,28 @@ class TeleopNode(Node):
 
         self.update_kinematics()
 
-        if self.last_ik_jacob_target is not None:
-            x_obj, y_obj, z_obj = self.last_ik_jacob_target
+        if self.last_ik_newton_target is not None:
+            x_obj, y_obj, z_obj = self.last_ik_newton_target
             self.update_mth_verification(
-                self.ikj_mth,
+                self.ikn_mth,
                 result.position[0], result.position[1], result.position[2],
                 x_obj, y_obj, z_obj
             )
             self.add_trail_point(x_obj, y_obj, z_obj)
 
-        if self._on_trajectory_ik_result('jacob'):
+        if self._on_trajectory_ik_result('newton'):
             return
 
-        self.set_ik_jacob_status(
-            "✓ Movimiento realizado.",
-            "green"
-        )
+        self.show_ik_done_status(self.set_ik_newton_status, q_deg)
 
 
     # ========================================================
-    # CINEMÁTICA INVERSA (JACOBIANO) - MENSAJE DE ESTADO
+    # CINEMÁTICA INVERSA (NEWTON) - MENSAJE DE ESTADO
     # ========================================================
 
-    def set_ik_jacob_status(self, message, color):
+    def set_ik_newton_status(self, message, color):
 
-        self.ikj_status_label.config(
+        self.ikn_status_label.config(
             text=message,
             foreground=color
         )
@@ -2917,7 +3398,7 @@ class TeleopNode(Node):
         if not result.reachable:
 
             for label in self.ikd_q_labels:
-                label.config(text="--")
+                label.config(text="--", foreground='')
 
             self.set_ik_des_status(
                 "✗ Posición no alcanzable.",
@@ -2930,8 +3411,7 @@ class TeleopNode(Node):
 
         q_deg = [math.degrees(q) for q in result.position]
 
-        for label, value in zip(self.ikd_q_labels, q_deg):
-            label.config(text=f"{value:.2f}°")
+        self.show_ik_q_labels(self.ikd_q_labels, q_deg)
 
 
         # ----------------------------------------------------
@@ -2977,10 +3457,7 @@ class TeleopNode(Node):
         if self._on_trajectory_ik_result('des'):
             return
 
-        self.set_ik_des_status(
-            "✓ Movimiento realizado.",
-            "green"
-        )
+        self.show_ik_done_status(self.set_ik_des_status, q_deg)
 
 
     # ========================================================
@@ -3068,7 +3545,7 @@ class TeleopNode(Node):
         if not result.reachable:
 
             for label in self.ikg_q_labels:
-                label.config(text="--")
+                label.config(text="--", foreground='')
 
             self.set_ik_geom_status(
                 "✗ Posición no alcanzable.",
@@ -3081,8 +3558,7 @@ class TeleopNode(Node):
 
         q_deg = [math.degrees(q) for q in result.position]
 
-        for label, value in zip(self.ikg_q_labels, q_deg):
-            label.config(text=f"{value:.2f}°")
+        self.show_ik_q_labels(self.ikg_q_labels, q_deg)
 
 
         # ----------------------------------------------------
@@ -3128,10 +3604,7 @@ class TeleopNode(Node):
         if self._on_trajectory_ik_result('geom'):
             return
 
-        self.set_ik_geom_status(
-            "✓ Movimiento realizado.",
-            "green"
-        )
+        self.show_ik_done_status(self.set_ik_geom_status, q_deg)
 
 
     # ========================================================
@@ -3147,10 +3620,193 @@ class TeleopNode(Node):
 
 
     # ========================================================
+    # CINEMÁTICA INVERSA (GRADIENTE DESCENDENTE) - ENVIAR OBJETIVO
+    # ========================================================
+
+    def send_ik_grad_target(self):
+
+        try:
+            x = float(self.ikgr_entries['X'].get())
+            y = float(self.ikgr_entries['Y'].get())
+            z = float(self.ikgr_entries['Z'].get())
+
+        except ValueError:
+
+            self.set_ik_grad_status(
+                "Error: X, Y, Z deben ser valores numéricos.",
+                "red"
+            )
+
+            return
+
+        self.last_ik_grad_target = (x, y, z)
+
+        # La semilla no se pide al usuario: se toma la pose
+        # articular actual (self.target_deg), que es la misma
+        # que se ve en la pestaña de cinemática directa.
+
+        target = IKJacobTarget()
+        target.x = x
+        target.y = y
+        target.z = z
+        target.q1_seed = self.target_deg[0]
+        target.q2_seed = self.target_deg[1]
+        target.q3_seed = self.target_deg[2]
+
+        self.ik_grad_target_pub.publish(target)
+
+        self.set_ik_grad_status(
+            "Calculando...",
+            "gray"
+        )
+
+
+    # ========================================================
+    # CINEMÁTICA INVERSA (GRADIENTE DESCENDENTE) - IR A HOME
+    # ========================================================
+
+    def go_home_grad(self):
+
+        self.ikgr_entries['X'].delete(0, tk.END)
+        self.ikgr_entries['X'].insert(0, f"{HOME_X}")
+
+        self.ikgr_entries['Y'].delete(0, tk.END)
+        self.ikgr_entries['Y'].insert(0, f"{HOME_Y}")
+
+        self.ikgr_entries['Z'].delete(0, tk.END)
+        self.ikgr_entries['Z'].insert(0, f"{HOME_Z}")
+
+        self.send_ik_grad_target()
+
+
+    # ========================================================
+    # CINEMÁTICA INVERSA (GRADIENTE DESCENDENTE) - RECEPCIÓN DEL RESULTADO
+    # (hilo de ROS; solo guarda el dato, ver refresh())
+    # ========================================================
+
+    def on_ik_grad_result(self, msg):
+
+        self.pending_ik_grad_result = msg
+
+
+    # ========================================================
+    # CINEMÁTICA INVERSA (GRADIENTE DESCENDENTE) - APLICAR RESULTADO
+    # (hilo de Tkinter, llamado desde refresh())
+    # ========================================================
+
+    def apply_ik_grad_result(self, result):
+
+        if not result.reachable:
+
+            for label in self.ikgr_q_labels:
+                label.config(text="--", foreground='')
+
+            self.set_ik_grad_status(
+                "✗ No convergió / posición no alcanzable.",
+                "red"
+            )
+
+            self.reset_mth_verification(self.ikgr_mth)
+
+            return
+
+        q_deg = [math.degrees(q) for q in result.position]
+
+        self.show_ik_q_labels(self.ikgr_q_labels, q_deg)
+
+
+        # ----------------------------------------------------
+        # Movemos el modelo en RViz por el mismo camino que las
+        # demás pestañas (kinematics_node -> control_node ->
+        # robot_state_publisher).
+        # ----------------------------------------------------
+
+        command_msg = RobotCommand()
+        command_msg.position = list(result.position)
+        self.command_pub.publish(command_msg)
+
+
+        # ----------------------------------------------------
+        # Sincronizamos sliders/entradas/matriz de la pestaña
+        # de cinemática directa con la nueva pose.
+        # ----------------------------------------------------
+
+        for i in range(min(self.num_joints, len(q_deg))):
+
+            self.target_deg[i] = q_deg[i]
+
+            self.sliders[i].set(q_deg[i])
+
+            self.slider_labels[i].config(
+                text=f"{q_deg[i]:.1f}°"
+            )
+
+            self.entries[i].delete(0, tk.END)
+            self.entries[i].insert(0, f"{q_deg[i]:.1f}")
+
+        self.update_kinematics()
+
+        if self.last_ik_grad_target is not None:
+            x_obj, y_obj, z_obj = self.last_ik_grad_target
+            self.update_mth_verification(
+                self.ikgr_mth,
+                result.position[0], result.position[1], result.position[2],
+                x_obj, y_obj, z_obj
+            )
+            self.add_trail_point(x_obj, y_obj, z_obj)
+
+        if self._on_trajectory_ik_result('grad'):
+            return
+
+        self.show_ik_done_status(self.set_ik_grad_status, q_deg)
+
+
+    # ========================================================
+    # CINEMÁTICA INVERSA (GRADIENTE DESCENDENTE) - MENSAJE DE ESTADO
+    # ========================================================
+
+    def set_ik_grad_status(self, message, color):
+
+        self.ikgr_status_label.config(
+            text=message,
+            foreground=color
+        )
+
+
+    # ========================================================
+    # ENCABEZADO CON EL NOMBRE DEL MÉTODO (pestañas de IK)
+    # ========================================================
+
+    def build_method_header(self, parent, text):
+
+        ttk.Label(
+            parent,
+            text=text,
+            style='Method.TLabel'
+        ).pack(
+            pady=(0, 6)
+        )
+
+
+    # ========================================================
+    # CAMBIO DE PESTAÑA: título de la ventana con el método
+    # ========================================================
+
+    def on_tab_changed(self, notebook):
+
+        method = self.tab_titles.get(notebook.select(), "")
+
+        self.root.title(
+            f"Teleop pata bípedo - Pierna {self.leg_name}"
+            + (f" - {method}" if method else "")
+        )
+
+
+    # ========================================================
     # VERIFICACIÓN MTH - CONSTRUCCIÓN DEL WIDGET
     #
     # Se llama una vez por cada pestaña de cinemática inversa
-    # (algebraica, Jacobiano, desacople, geométrico). Devuelve un diccionario
+    # (algebraica, Newton, desacople, geométrico, gradiente). Devuelve un diccionario
     # con las referencias gráficas que después actualizan
     # update_mth_verification() / reset_mth_verification().
     # ========================================================
@@ -3224,7 +3880,7 @@ class TeleopNode(Node):
     # VERIFICACIÓN MTH - ACTUALIZAR CON UN RESULTADO
     #
     # Arma Tdes a partir del (q1,q2,q3) que calculó el método de
-    # la pestaña (algebraico / Jacobiano / desacople), le pide al
+    # la pestaña (algebraico / Newton / desacople), le pide al
     # método MTH que recupere esos mismos ángulos leyendo la
     # matriz, y muestra la comparación.
     # ========================================================
@@ -3445,7 +4101,7 @@ class TeleopNode(Node):
 
 
     # ========================================================
-    # RECIBIR ÁNGULO REAL DEL SERVO (/servo_states, ESP32)
+    # RECIBIR ÁNGULO REAL DEL SERVO (/robot/hardware_state)
     # ========================================================
 
     def on_servo_state(
@@ -3464,22 +4120,18 @@ class TeleopNode(Node):
 
             for i in range(n):
 
-                # El firmware trabaja en "espacio de servo"
-                # (con el offset ya sumado). Se resta acá para
-                # mostrarlo en el mismo sistema de grados que
-                # usan los sliders (espacio cinemático).
+                # control_node ya le restó el offset de cada
+                # servo: llega en el mismo sistema de grados
+                # que usan los sliders (espacio cinemático).
 
-                self.real_deg[i] = (
-                    float(data[i])
-                    - self.servo_offset_deg[i]
-                )
+                self.real_deg[i] = float(data[i])
 
             self.has_real_state = True
 
         except Exception as e:
 
             self.get_logger().error(
-                f"Error procesando /servo_states: {e}"
+                f"Error procesando /robot/hardware_state: {e}"
             )
 
 
@@ -3489,43 +4141,77 @@ class TeleopNode(Node):
 
     def refresh(self):
 
+        # Un error al aplicar un resultado NO debe cortar este
+        # ciclo: si no se reprograma, la interfaz deja de
+        # aplicar resultados de IK para siempre. Por eso el
+        # trabajo va en _refresh_once() y el after() siempre
+        # se ejecuta.
+
+        try:
+
+            self._refresh_once()
+
+        except Exception as e:
+
+            self.get_logger().error(
+                f"Error actualizando la interfaz: {e}"
+            )
+
+        self.root.after(
+            50,
+            self.refresh
+        )
+
+
+    def _refresh_once(self):
+
         # ----------------------------------------------------
         # Si llegó un resultado nuevo de cinemática inversa,
         # lo aplicamos acá (hilo de Tkinter), nunca dentro de
         # on_ik_result (hilo de ROS).
         # ----------------------------------------------------
 
+        if self.pending_hardware_status is not None:
+
+            pendiente = self.pending_hardware_status
+            self.pending_hardware_status = None
+
+            self.show_hardware_status(pendiente)
+
         if self.pending_ik_result is not None:
 
-            self.apply_ik_result(
-                self.pending_ik_result
-            )
-
+            pendiente = self.pending_ik_result
             self.pending_ik_result = None
 
-        if self.pending_ik_jacob_result is not None:
+            self.apply_ik_result(pendiente)
 
-            self.apply_ik_jacob_result(
-                self.pending_ik_jacob_result
-            )
+        if self.pending_ik_newton_result is not None:
 
-            self.pending_ik_jacob_result = None
+            pendiente = self.pending_ik_newton_result
+            self.pending_ik_newton_result = None
+
+            self.apply_ik_newton_result(pendiente)
 
         if self.pending_ik_des_result is not None:
 
-            self.apply_ik_des_result(
-                self.pending_ik_des_result
-            )
-
+            pendiente = self.pending_ik_des_result
             self.pending_ik_des_result = None
+
+            self.apply_ik_des_result(pendiente)
 
         if self.pending_ik_geom_result is not None:
 
-            self.apply_ik_geom_result(
-                self.pending_ik_geom_result
-            )
-
+            pendiente = self.pending_ik_geom_result
             self.pending_ik_geom_result = None
+
+            self.apply_ik_geom_result(pendiente)
+
+        if self.pending_ik_grad_result is not None:
+
+            pendiente = self.pending_ik_grad_result
+            self.pending_ik_grad_result = None
+
+            self.apply_ik_grad_result(pendiente)
 
 
         # ----------------------------------------------------
@@ -3560,10 +4246,6 @@ class TeleopNode(Node):
                     foreground='gray'
                 )
 
-        self.root.after(
-            50,
-            self.refresh
-        )
 
 
     # ========================================================
