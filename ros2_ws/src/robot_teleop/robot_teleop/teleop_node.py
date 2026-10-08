@@ -55,30 +55,13 @@ from robot_kinematics.cinematica_directa_der_izq import (
     forward_kinematics_right,
     forward_kinematics_left,
     get_position,
-    L1, L2, L3, L4, L5, L6
 )
 
 from robot_kinematics.kinem_invers_leg_mth_izq import verificar_con_mth
 
-from robot_kinematics.kinem_invers_leg_algebraico_izq import (
-    cinematica_inversa_pata_alg
-)
+from robot_kinematics import perfiles_temporales as pt
 
-from robot_kinematics.kinem_invers_leg_Newton_izq import (
-    cinematica_inversa_pata_newton
-)
-
-from robot_kinematics.kinem_invers_leg_mth_desacople_izq import (
-    cinematica_inversa_pata_des_xyz
-)
-
-from robot_kinematics.kinem_invers_leg_Geometrico_izq import (
-    cinematica_inversa_pata_geom
-)
-
-from robot_kinematics.kinem_invers_leg_gradiente_descendente import (
-    cinematica_inversa_pata_grad
-)
+from robot_teleop.trayectorias_ui import PestanaTrayectorias
 
 
 # ------------------------------------------------------------
@@ -91,7 +74,7 @@ HOME_Z = -306.98   # pierna izquierda (q = 0)
 
 
 # ============================================================
-# TRAYECTORIA DESDE ARCHIVO (pestaña de IK algebraica)
+# TRAYECTORIA DESDE ARCHIVO (pestaña "Trayectorias" / trazador)
 # ============================================================
 #
 # El archivo trayectoria.txt vive en
@@ -100,10 +83,10 @@ HOME_Z = -306.98   # pierna izquierda (q = 0)
 # que volver a correr `colcon build`.
 #
 # Formato: una línea por punto "x, y, z" en mm (mismo sistema
-# de coordenadas que los campos X, Y, Z de la pestaña). Se
-# aceptan comas o espacios como separador (y corchetes o paréntesis
-# alrededor de cada punto); las líneas vacías y
-# lo que va después de '#' se ignoran.
+# de coordenadas que los campos X, Y, Z de las pestañas de
+# cinemática). Se aceptan comas o espacios como separador (y
+# corchetes o paréntesis alrededor de cada punto); las líneas
+# vacías y lo que va después de '#' se ignoran.
 #
 # ============================================================
 
@@ -160,6 +143,32 @@ def _load_trajectory_file(path):
             points.append((line_number, x, y, z))
 
     return points
+
+
+# ============================================================
+# TIPO DE DESPLAZAMIENTO (pestañas de cinemática inversa)
+#
+# Movimiento articular de la pose actual al punto calculado, con
+# la ley temporal elegida (perfiles_temporales.py). No se incluyen
+# los métodos de "puntos intermedios": aquí siempre hay un solo
+# tramo, de la pose actual al destino.
+# ============================================================
+
+DT_MOVIMIENTO = 0.02   # 50 Hz, igual que la pestaña "Trayectorias"
+
+METODOS_DESPLAZAMIENTO = (
+    'lineal', 'cubico', 'quintico', 'trapezoidal', 'tiempo_minimo'
+)
+
+# Qué campos de parámetros (aparte de T) se habilitan para cada
+# método. 'trapezoidal' exige llenar uno solo de los tres.
+CAMPOS_DESPLAZAMIENTO = {
+    'lineal': (),
+    'cubico': ('v0', 'vf'),
+    'quintico': ('v0', 'vf', 'a0', 'af'),
+    'trapezoidal': ('vmax', 'amax', 'tb'),
+    'tiempo_minimo': ('amax',),
+}
 
 
 # ============================================================
@@ -399,15 +408,14 @@ class TeleopNode(Node):
 
 
         # ----------------------------------------------------
-        # Trayectorias desde archivo, una por pestaña de IK
-        # ('alg', 'newton', 'des', 'geom', 'grad'). Cada entrada guarda sus
-        # widgets (los llena build_trajectory_frame), la lista
-        # de puntos (x, y, z) en mm a visitar, el índice del
-        # punto actual, si está corriendo, y el id del
-        # root.after() pendiente (para cancelarlo con "Parar").
+        # Movimiento punto a punto animado, uno por pestaña de IK
+        # ('alg', 'newton', 'des', 'geom', 'grad'). Cada entrada
+        # guarda sus widgets de tipo de trayectoria (los llena
+        # build_motion_type_frame) y, mientras se está moviendo,
+        # las muestras (Q, t) y el id del root.after() pendiente.
         # ----------------------------------------------------
 
-        self.trajectories = {}
+        self.ik_motion = {}
 
 
         # ----------------------------------------------------
@@ -422,6 +430,14 @@ class TeleopNode(Node):
         # ----------------------------------------------------
 
         self.trail_points = []
+
+        # Índices de trail_points donde empieza un trazo nuevo (lápiz
+        # levantado entre medio): ahí no se dibuja la unión.
+        self.trail_cortes = []
+
+        # True mientras la pestaña de trayectorias mueve los sliders
+        # por código, para que no vuelvan a publicar.
+        self._sincronizando = False
 
         self.trail_pub = self.create_publisher(
             Marker,
@@ -720,6 +736,35 @@ class TeleopNode(Node):
                 "Cinemática inversa - Método de gradiente descendente"
             ),
         }
+
+        tab_tray = ttk.Frame(
+            notebook,
+            padding=6
+        )
+
+        notebook.add(
+            tab_tray,
+            text="Trayectorias"
+        )
+
+        self.tab_titles[str(tab_tray)] = "Trayectorias"
+        self.tab_tray = tab_tray
+
+        # ----------------------------------------------------
+        # Pestaña de generación de trayectorias (perfiles
+        # temporales y ejecución a 50 Hz). Necesita más ancho
+        # para las gráficas: la ventana se agranda mientras
+        # está seleccionada (ver on_tab_changed).
+        # ----------------------------------------------------
+
+        try:
+            archivo_inicial = _trajectory_file_path()
+        except Exception:
+            archivo_inicial = ''
+
+        self.pestana_trayectorias = PestanaTrayectorias(
+            tab_tray, self, archivo_inicial
+        )
 
         notebook.bind(
             '<<NotebookTabChanged>>',
@@ -1324,15 +1369,12 @@ class TeleopNode(Node):
 
 
         # ----------------------------------------------------
-        # TRAYECTORIA DESDE ARCHIVO (trayectoria.txt)
+        # TIPO DE DESPLAZAMIENTO (ley temporal del movimiento)
         # ----------------------------------------------------
 
-        self.build_trajectory_frame(
+        self.build_motion_type_frame(
             tab_ik,
-            'alg',
-            self.ik_entries,
-            self.send_ik_target,
-            self.set_ik_status
+            'alg'
         )
 
 
@@ -1517,15 +1559,12 @@ class TeleopNode(Node):
 
 
         # ----------------------------------------------------
-        # TRAYECTORIA DESDE ARCHIVO (trayectoria.txt)
+        # TIPO DE DESPLAZAMIENTO (ley temporal del movimiento)
         # ----------------------------------------------------
 
-        self.build_trajectory_frame(
+        self.build_motion_type_frame(
             tab_ik_newton,
-            'newton',
-            self.ikn_entries,
-            self.send_ik_newton_target,
-            self.set_ik_newton_status
+            'newton'
         )
 
 
@@ -1710,15 +1749,12 @@ class TeleopNode(Node):
 
 
         # ----------------------------------------------------
-        # TRAYECTORIA DESDE ARCHIVO (trayectoria.txt)
+        # TIPO DE DESPLAZAMIENTO (ley temporal del movimiento)
         # ----------------------------------------------------
 
-        self.build_trajectory_frame(
+        self.build_motion_type_frame(
             tab_ik_des,
-            'des',
-            self.ikd_entries,
-            self.send_ik_des_target,
-            self.set_ik_des_status
+            'des'
         )
 
 
@@ -1903,15 +1939,12 @@ class TeleopNode(Node):
 
 
         # ----------------------------------------------------
-        # TRAYECTORIA DESDE ARCHIVO (trayectoria.txt)
+        # TIPO DE DESPLAZAMIENTO (ley temporal del movimiento)
         # ----------------------------------------------------
 
-        self.build_trajectory_frame(
+        self.build_motion_type_frame(
             tab_ik_geom,
-            'geom',
-            self.ikg_entries,
-            self.send_ik_geom_target,
-            self.set_ik_geom_status
+            'geom'
         )
 
 
@@ -2096,15 +2129,12 @@ class TeleopNode(Node):
 
 
         # ----------------------------------------------------
-        # TRAYECTORIA DESDE ARCHIVO (trayectoria.txt)
+        # TIPO DE DESPLAZAMIENTO (ley temporal del movimiento)
         # ----------------------------------------------------
 
-        self.build_trajectory_frame(
+        self.build_motion_type_frame(
             tab_ik_grad,
-            'grad',
-            self.ikgr_entries,
-            self.send_ik_grad_target,
-            self.set_ik_grad_status
+            'grad'
         )
 
 
@@ -2168,6 +2198,9 @@ class TeleopNode(Node):
         index,
         value
     ):
+
+        if self._sincronizando:
+            return
 
         try:
             value = float(value)
@@ -2543,387 +2576,376 @@ class TeleopNode(Node):
 
 
     # ========================================================
-    # TRAYECTORIA DESDE ARCHIVO - WIDGETS DE UNA PESTAÑA
+    # TIPO DE DESPLAZAMIENTO - WIDGETS DE UNA PESTAÑA
     #
     # Se llama una vez por cada pestaña de cinemática inversa.
-    # Lee los puntos (x, y, z) de trayectoria.txt, verifica que
-    # todos tengan solución con el método de esa pestaña y los
-    # va enviando uno por uno, con una pausa entre cada uno. Por
-    # defecto solo se mueve el modelo en RViz; con la casilla
-    # marcada también se envía cada punto a los motores reales.
+    # Construye el selector de ley temporal (lineal / cúbico /
+    # quíntico / trapezoidal / tiempo mínimo) y sus campos de
+    # parámetros, para el movimiento articular de la pose actual
+    # hasta el punto calculado (ver _mover_ik).
     # ========================================================
 
-    def build_trajectory_frame(
-        self, parent, key, entries, send_target, set_status
-    ):
+    def build_motion_type_frame(self, parent, key):
 
-        traj_frame = ttk.LabelFrame(
+        motion_frame = ttk.LabelFrame(
             parent,
-            text=f"Trayectoria desde archivo ({TRAJECTORY_FILE_NAME})",
+            text="Tipo de desplazamiento",
             padding=8,
             style='Section.TLabelframe'
         )
 
-        traj_frame.pack(
+        motion_frame.pack(
             fill='x',
             pady=(0, 8)
         )
 
-        ttk.Label(
-            traj_frame,
-            text="Intervalo (ms):"
-        ).grid(
+        metodo_var = tk.StringVar(value=pt.NOMBRES['quintico'])
+
+        metodo_combo = ttk.Combobox(
+            motion_frame,
+            textvariable=metodo_var,
+            state='readonly',
+            width=40,
+            values=[pt.NOMBRES[m] for m in METODOS_DESPLAZAMIENTO]
+        )
+
+        metodo_combo.grid(
             row=0,
-            column=0,
-            padx=(5, 3),
-            pady=5
-        )
-
-        interval_entry = tk.Entry(
-            traj_frame,
-            width=8,
-            justify='center'
-        )
-
-        interval_entry.insert(0, "150")
-
-        interval_entry.grid(
-            row=0,
-            column=1,
-            padx=(0, 10),
-            pady=5
-        )
-
-        hardware_var = tk.BooleanVar(value=False)
-
-        tk.Checkbutton(
-            traj_frame,
-            text="Enviar también a motores",
-            variable=hardware_var
-        ).grid(
-            row=0,
-            column=2,
-            columnspan=2,
-            padx=(5, 3),
-            pady=5
-        )
-
-        ttk.Button(
-            traj_frame,
-            text="Seguir trayectoria",
-            command=lambda: self.start_file_trajectory(key)
-        ).grid(
-            row=1,
-            column=0,
-            columnspan=2,
-            pady=(5, 0)
-        )
-
-        tk.Button(
-            traj_frame,
-            text="Parar",
-            bg='#ffdddd',
-            command=lambda: self.stop_file_trajectory(key)
-        ).grid(
-            row=1,
-            column=2,
-            columnspan=2,
-            pady=(5, 0)
-        )
-
-        tk.Button(
-            traj_frame,
-            text="Limpiar rastro (RViz)",
-            bg='#ddeeff',
-            command=self.clear_trail
-        ).grid(
-            row=2,
             column=0,
             columnspan=4,
-            pady=(5, 0)
+            sticky='w',
+            padx=(5, 3),
+            pady=(5, 3)
         )
 
-        self.trajectories[key] = {
-            'entries': entries,
-            'send_target': send_target,
-            'set_status': set_status,
-            'interval_entry': interval_entry,
-            'hardware_var': hardware_var,
-            'points': [],
-            'index': 0,
-            'running': False,
+        campos = {}
+
+        def campo(clave, texto, fila, col):
+
+            ttk.Label(
+                motion_frame,
+                text=texto
+            ).grid(
+                row=fila,
+                column=col,
+                sticky='w',
+                padx=(5, 2),
+                pady=2
+            )
+
+            entry = tk.Entry(
+                motion_frame,
+                width=7,
+                justify='center'
+            )
+
+            entry.grid(
+                row=fila,
+                column=col + 1,
+                sticky='w',
+                padx=(0, 8),
+                pady=2
+            )
+
+            campos[clave] = entry
+
+        campo('T', "T (s):", 1, 0)
+        campo('v0', "v0 (°/s):", 1, 2)
+        campo('vf', "vf (°/s):", 2, 0)
+        campo('a0', "a0 (°/s²):", 2, 2)
+        campo('af', "af (°/s²):", 3, 0)
+        campo('vmax', "vmax (°/s):", 3, 2)
+        campo('amax', "amax (°/s²):", 4, 0)
+        campo('tb', "tb (s):", 4, 2)
+
+        campos['amax'].insert(0, "60")
+
+        aviso_label = ttk.Label(
+            motion_frame,
+            text="",
+            foreground='#555',
+            wraplength=330,
+            justify='left'
+        )
+
+        aviso_label.grid(
+            row=5,
+            column=0,
+            columnspan=4,
+            sticky='w',
+            padx=(5, 3),
+            pady=(3, 0)
+        )
+
+        coord_var = tk.BooleanVar(value=True)
+
+        ttk.Checkbutton(
+            motion_frame,
+            text="Coordinado (mismo tiempo en las 3 articulaciones)",
+            variable=coord_var
+        ).grid(
+            row=6,
+            column=0,
+            columnspan=4,
+            sticky='w',
+            padx=(5, 3),
+            pady=(3, 0)
+        )
+
+        self.ik_motion[key] = {
+            'metodo_var': metodo_var,
+            'campos': campos,
+            'coord_var': coord_var,
+            'aviso_label': aviso_label,
             'after_id': None,
-            'interval_ms': 150,
         }
 
+        metodo_combo.bind(
+            '<<ComboboxSelected>>',
+            lambda event: self._actualizar_campos_desplazamiento(key)
+        )
+
+        self._actualizar_campos_desplazamiento(key)
+
 
     # ========================================================
-    # TRAYECTORIA DESDE ARCHIVO - VALIDAR TODOS LOS PUNTOS
+    # TIPO DE DESPLAZAMIENTO - MÉTODO ELEGIDO EN UNA PESTAÑA
+    # ========================================================
+
+    def _metodo_desplazamiento(self, key):
+
+        inverso = {texto: metodo for metodo, texto in pt.NOMBRES.items()}
+
+        return inverso[self.ik_motion[key]['metodo_var'].get()]
+
+
+    # ========================================================
+    # TIPO DE DESPLAZAMIENTO - HABILITAR CAMPOS SEGÚN EL MÉTODO
+    # ========================================================
+
+    def _actualizar_campos_desplazamiento(self, key):
+
+        motion = self.ik_motion[key]
+        metodo = self._metodo_desplazamiento(key)
+        campos = motion['campos']
+
+        activos = set(CAMPOS_DESPLAZAMIENTO[metodo])
+
+        campos['T'].config(
+            state='disabled' if metodo == 'tiempo_minimo' else 'normal'
+        )
+
+        for clave in ('v0', 'vf', 'a0', 'af', 'vmax', 'amax', 'tb'):
+
+            campos[clave].config(
+                state='normal' if clave in activos else 'disabled'
+            )
+
+        if metodo == 'trapezoidal':
+            motion['aviso_label'].config(
+                text="Completa SOLO uno de: vmax, amax o tb."
+            )
+        else:
+            motion['aviso_label'].config(text="")
+
+
+    # ========================================================
+    # TIPO DE DESPLAZAMIENTO - LEER MÉTODO Y PARÁMETROS
     #
-    # Resuelve cada punto con el mismo método de la pestaña.
-    # Para Newton y el gradiente se encadena la semilla igual que en la
-    # ejecución real: se parte de la pose actual y cada punto
-    # usa como semilla la solución del anterior. Devuelve el
-    # primer punto sin solución o con ángulos fuera de los
-    # límites articulares (con el motivo), o None si todos
-    # están bien.
+    # Devuelve (metodo, T o None, params, coordinado). Lanza
+    # ValueError / pt.ErrorPerfil si algún campo requerido falta
+    # o no es numérico.
     # ========================================================
 
-    def _first_unreachable_point(self, key, points):
+    def _leer_parametros_movimiento(self, key):
 
-        seed_deg = list(self.target_deg)
+        motion = self.ik_motion[key]
+        metodo = self._metodo_desplazamiento(key)
+        campos = motion['campos']
 
-        for line_number, x, y, z in points:
+        def valor(clave):
+            texto = campos[clave].get().strip()
+            return float(texto) if texto else None
 
-            if key == 'newton':
-                q1, q2, q3, ok = cinematica_inversa_pata_newton(
-                    x, y, z, *seed_deg
-                )
-            elif key == 'des':
-                q1, q2, q3, ok = cinematica_inversa_pata_des_xyz(x, y, z)
-            elif key == 'geom':
-                q1, q2, q3, ok = cinematica_inversa_pata_geom(
-                    x, y, z, L1, L2, L3, L4, L5, L6
-                )
-            elif key == 'grad':
-                q1, q2, q3, ok = cinematica_inversa_pata_grad(
-                    x, y, z, *seed_deg
-                )
-            else:
-                q1, q2, q3, ok = cinematica_inversa_pata_alg(
-                    x, y, z, L1, L2, L3, L4, L5, L6
-                )
+        T = None
 
-            if not ok:
-                return line_number, x, y, z, "no alcanzable"
+        if metodo != 'tiempo_minimo':
 
-            seed_deg = [math.degrees(q) for q in (q1, q2, q3)]
+            T = valor('T')
 
-            fuera = self.ik_limit_violations(seed_deg)
+            if T is None:
+                raise pt.ErrorPerfil('falta el tiempo T del movimiento')
 
-            if fuera:
-                return (
-                    line_number, x, y, z,
-                    "fuera de límites: " + ", ".join(fuera)
+        params = {}
+
+        for clave in CAMPOS_DESPLAZAMIENTO[metodo]:
+
+            v = valor(clave)
+
+            if v is not None:
+                params[clave] = v
+
+        if metodo == 'trapezoidal':
+
+            if sum(c in params for c in ('vmax', 'amax', 'tb')) != 1:
+                raise pt.ErrorPerfil(
+                    'para trapezoidal completa SOLO uno de: vmax, amax o tb'
                 )
 
-        return None
+        elif metodo == 'tiempo_minimo' and 'amax' not in params:
+
+            raise pt.ErrorPerfil('falta la aceleración máxima (amax)')
+
+        return metodo, T, params, motion['coord_var'].get()
 
 
     # ========================================================
-    # TRAYECTORIA DESDE ARCHIVO - CARGAR, VALIDAR Y LANZAR
+    # DETENER CUALQUIER MOVIMIENTO ANIMADO EN CURSO
+    #
+    # Se llama antes de empezar uno nuevo (en cualquier pestaña
+    # de IK o en la pestaña "Trayectorias"), para que no compitan
+    # dos bucles por self.target_deg / publish_target a la vez.
     # ========================================================
 
-    def start_file_trajectory(self, key):
+    def stop_all_motion(self):
 
-        traj = self.trajectories[key]
-        set_status = traj['set_status']
+        for motion in self.ik_motion.values():
+
+            if motion.get('after_id') is not None:
+
+                try:
+                    self.root.after_cancel(motion['after_id'])
+                except Exception:
+                    pass
+
+                motion['after_id'] = None
+
+        pestana = getattr(self, 'pestana_trayectorias', None)
+
+        if pestana is not None:
+            pestana.parar(silencioso=True)
+
+
+    # ========================================================
+    # MOVIMIENTO PUNTO A PUNTO - INICIAR
+    #
+    # Mueve la pierna desde la pose actual (self.target_deg)
+    # hasta q_destino_deg con la ley temporal elegida en la
+    # pestaña, animando a 50 Hz en vez de saltar de golpe.
+    # Se llama desde cada apply_ik_*_result cuando el punto es
+    # alcanzable.
+    # ========================================================
+
+    def _mover_ik(
+        self, key, q_destino_deg, q_labels, mth_widgets, set_status,
+        objetivo_xyz
+    ):
+
+        self.stop_all_motion()
 
         try:
-            interval_ms = int(float(traj['interval_entry'].get()))
+            metodo, T, params, coordinado = self._leer_parametros_movimiento(key)
 
-        except ValueError:
+            perfiles = pt.planificar_ptp(
+                list(self.target_deg), q_destino_deg, metodo, T, params,
+                coordinado
+            )
+
+            _, Q, _, _ = pt.muestrear(perfiles, DT_MOVIMIENTO)
+
+        except (pt.ErrorPerfil, ValueError, KeyError) as error:
 
             set_status(
-                "Error: el intervalo debe ser numérico.",
+                f"✗ {error or 'revisa los parámetros de la trayectoria'}",
                 "red"
             )
 
             return
 
-        if interval_ms < 20:
-            interval_ms = 20
+        motion = self.ik_motion[key]
 
-        try:
-            path = _trajectory_file_path()
-            points = _load_trajectory_file(path)
-
-        except FileNotFoundError:
-
-            set_status(
-                f"Error: no se encontró {TRAJECTORY_FILE_NAME} "
-                f"(¿se corrió colcon build?).",
-                "red"
-            )
-
-            return
-
-        except Exception as error:
-
-            set_status(
-                f"Error en {TRAJECTORY_FILE_NAME}: {error}",
-                "red"
-            )
-
-            return
-
-        if not points:
-
-            set_status(
-                f"Error: {TRAJECTORY_FILE_NAME} no tiene puntos.",
-                "red"
-            )
-
-            return
-
-        # Antes de mover nada se verifica que todos los puntos
-        # tengan solución, para no quedar a mitad de camino.
-
-        unreachable = self._first_unreachable_point(key, points)
-
-        if unreachable is not None:
-
-            line_number, x, y, z, motivo = unreachable
-
-            set_status(
-                f"✗ Línea {line_number}: ({x:.1f}, {y:.1f}, "
-                f"{z:.1f}) {motivo}. No se ejecutó.",
-                "red"
-            )
-
-            return
-
-        # Solo una trayectoria a la vez: se cancela cualquiera
-        # que siga pendiente (en esta u otra pestaña).
-
-        for other_key in self.trajectories:
-            self.stop_file_trajectory(other_key)
-
-        traj['points'] = [(x, y, z) for _, x, y, z in points]
-        traj['index'] = 0
-        traj['running'] = True
-        traj['interval_ms'] = interval_ms
+        motion.update({
+            'Q': Q,
+            'idx': 0,
+            'after_id': None,
+            'q_labels': q_labels,
+            'mth_widgets': mth_widgets,
+            'set_status': set_status,
+            'objetivo_xyz': objetivo_xyz,
+        })
 
         set_status(
-            f"Siguiendo trayectoria... (0/{len(traj['points'])})",
+            "Moviendo...",
             "blue"
         )
 
-        self._file_trajectory_step(key)
+        self._tick_ik_motion(key)
 
 
     # ========================================================
-    # TRAYECTORIA DESDE ARCHIVO - UN PASO
-    # (encadenado solo, vía root.after; no bloquea la GUI)
+    # MOVIMIENTO PUNTO A PUNTO - UN PASO (50 Hz)
     # ========================================================
 
-    def _file_trajectory_step(self, key):
+    def _tick_ik_motion(self, key):
 
-        traj = self.trajectories[key]
+        motion = self.ik_motion[key]
+        Q = motion['Q']
+        idx = motion['idx']
 
-        if not traj['running']:
-            return
+        q = [float(v) for v in Q[idx]]
+        self.target_deg = q
 
-        if traj['index'] >= len(traj['points']):
+        # Mientras se actualizan sliders/entradas por código, no deben
+        # volver a publicar (igual que en trayectorias_ui._sincronizar_gui).
+        self._sincronizando = True
 
-            traj['running'] = False
+        for i in range(min(self.num_joints, len(q))):
 
-            traj['set_status'](
-                "✓ Trayectoria completa.",
-                "green"
+            self.sliders[i].set(q[i])
+
+            self.slider_labels[i].config(
+                text=f"{q[i]:.1f}°"
             )
 
-            return
+            self.entries[i].delete(0, tk.END)
+            self.entries[i].insert(0, f"{q[i]:.1f}")
 
-        x, y, z = traj['points'][traj['index']]
+        self.root.after_idle(lambda: setattr(self, '_sincronizando', False))
 
-        entries = traj['entries']
+        self.publish_target()
+        self.update_kinematics()
 
-        entries['X'].delete(0, tk.END)
-        entries['X'].insert(0, f"{x:.2f}")
+        self.show_ik_q_labels(motion['q_labels'], q)
 
-        entries['Y'].delete(0, tk.END)
-        entries['Y'].insert(0, f"{y:.2f}")
+        fin = idx >= len(Q) - 1
 
-        entries['Z'].delete(0, tk.END)
-        entries['Z'].insert(0, f"{z:.2f}")
+        if fin:
 
-        traj['send_target']()
+            motion['after_id'] = None
 
-        traj['index'] += 1
+            if motion['objetivo_xyz'] is not None:
 
-        traj['set_status'](
-            f"Siguiendo trayectoria... "
-            f"({traj['index']}/{len(traj['points'])})",
-            "blue"
-        )
+                x_obj, y_obj, z_obj = motion['objetivo_xyz']
+                q_rad = [math.radians(v) for v in q]
 
-        traj['after_id'] = self.root.after(
-            traj['interval_ms'],
-            lambda: self._file_trajectory_step(key)
-        )
-
-
-    # ========================================================
-    # TRAYECTORIA DESDE ARCHIVO - PARAR
-    # (el robot se queda en el último punto alcanzado)
-    # ========================================================
-
-    def stop_file_trajectory(self, key):
-
-        traj = self.trajectories[key]
-
-        was_running = traj['running']
-
-        traj['running'] = False
-
-        if traj['after_id'] is not None:
-
-            try:
-                self.root.after_cancel(traj['after_id'])
-            except Exception:
-                pass
-
-            traj['after_id'] = None
-
-        if was_running:
-
-            traj['set_status'](
-                f"Trayectoria detenida en el punto "
-                f"{traj['index']}/{len(traj['points'])}.",
-                "orange"
-            )
-
-
-    # ========================================================
-    # TRAYECTORIA DESDE ARCHIVO - TRAS UN RESULTADO DE IK
-    #
-    # Se llama desde apply_*_result cuando el punto fue
-    # alcanzable. Si la pestaña está siguiendo una trayectoria,
-    # envía el punto a los motores (si la casilla está marcada)
-    # y devuelve True para que no se pise el mensaje de
-    # progreso con "Movimiento realizado".
-    # ========================================================
-
-    def _on_trajectory_ik_result(self, key):
-
-        traj = self.trajectories.get(key)
-
-        if traj is None or not traj['running']:
-            return False
-
-        if traj['hardware_var'].get():
-
-            # Solo se muestran los errores, para no pisar el
-            # mensaje de progreso. Si un punto se rechaza (en
-            # la interfaz o en control_node), se detiene la
-            # trayectoria: los motores no deben saltarse puntos.
-
-            def solo_errores(message, color):
-                if color == 'red':
-                    traj['set_status'](message, color)
-
-            def detener():
-                self.stop_file_trajectory(key)
-                solo_errores(
-                    "✗ Trayectoria detenida: un punto no se pudo "
-                    "enviar a los motores.",
-                    'red'
+                self.update_mth_verification(
+                    motion['mth_widgets'],
+                    q_rad[0], q_rad[1], q_rad[2],
+                    x_obj, y_obj, z_obj
                 )
 
-            self.apply_to_hardware(solo_errores, detener)
+                self.add_trail_point(x_obj, y_obj, z_obj)
 
-        return True
+            self.show_ik_done_status(motion['set_status'], q)
+
+            return
+
+        motion['idx'] = idx + 1
+
+        motion['after_id'] = self.root.after(
+            int(DT_MOVIMIENTO * 1000),
+            lambda: self._tick_ik_motion(key)
+        )
 
 
     # ========================================================
@@ -2955,7 +2977,7 @@ class TeleopNode(Node):
 
         marker.ns = 'ik_trail'
         marker.id = 0
-        marker.type = Marker.LINE_STRIP
+        marker.type = Marker.LINE_LIST
         marker.action = Marker.ADD
 
         # ----------------------------------------------------
@@ -2994,7 +3016,15 @@ class TeleopNode(Node):
         marker.color.b = 0.5
         marker.color.a = 1.0
 
-        marker.points = list(self.trail_points)
+        # Pares de puntos consecutivos, saltando las uniones entre
+        # trazos (trail_cortes) que deja la pestaña de trayectorias.
+        cortes = set(self.trail_cortes)
+        puntos = []
+        for i in range(1, len(self.trail_points)):
+            if i not in cortes:
+                puntos.append(self.trail_points[i - 1])
+                puntos.append(self.trail_points[i])
+        marker.points = puntos
 
         self.trail_pub.publish(marker)
 
@@ -3006,6 +3036,7 @@ class TeleopNode(Node):
     def clear_trail(self):
 
         self.trail_points = []
+        self.trail_cortes = []
 
         self.publish_trail()
 
@@ -3047,50 +3078,17 @@ class TeleopNode(Node):
 
 
         # ----------------------------------------------------
-        # Movemos el modelo en RViz por el mismo camino que la
-        # pestaña de cinemática directa (kinematics_node ->
-        # control_node -> robot_state_publisher).
+        # Movemos la pierna de la pose actual al destino con la
+        # ley temporal elegida en "Tipo de desplazamiento" (en
+        # vez de saltar de golpe). _mover_ik anima a 50 Hz, deja
+        # self.target_deg/sliders/entradas sincronizados y, al
+        # terminar, verifica MTH y agrega el punto al rastro.
         # ----------------------------------------------------
 
-        command_msg = RobotCommand()
-        command_msg.position = list(result.position)
-        self.command_pub.publish(command_msg)
-
-
-        # ----------------------------------------------------
-        # Sincronizamos sliders/entradas/matriz de la pestaña
-        # de cinemática directa con la nueva pose, para que
-        # ambas pestañas muestren siempre el mismo estado.
-        # ----------------------------------------------------
-
-        for i in range(min(self.num_joints, len(q_deg))):
-
-            self.target_deg[i] = q_deg[i]
-
-            self.sliders[i].set(q_deg[i])
-
-            self.slider_labels[i].config(
-                text=f"{q_deg[i]:.1f}°"
-            )
-
-            self.entries[i].delete(0, tk.END)
-            self.entries[i].insert(0, f"{q_deg[i]:.1f}")
-
-        self.update_kinematics()
-
-        if self.last_ik_target is not None:
-            x_obj, y_obj, z_obj = self.last_ik_target
-            self.update_mth_verification(
-                self.ik_mth,
-                result.position[0], result.position[1], result.position[2],
-                x_obj, y_obj, z_obj
-            )
-            self.add_trail_point(x_obj, y_obj, z_obj)
-
-        if self._on_trajectory_ik_result('alg'):
-            return
-
-        self.show_ik_done_status(self.set_ik_status, q_deg)
+        self._mover_ik(
+            'alg', q_deg, self.ik_q_labels, self.ik_mth,
+            self.set_ik_status, self.last_ik_target
+        )
 
 
     # ========================================================
@@ -3268,49 +3266,15 @@ class TeleopNode(Node):
 
 
         # ----------------------------------------------------
-        # Movemos el modelo en RViz por el mismo camino que las
-        # demás pestañas (kinematics_node -> control_node ->
-        # robot_state_publisher).
+        # Movemos la pierna de la pose actual al destino con la
+        # ley temporal elegida en "Tipo de desplazamiento" (ver
+        # apply_ik_result).
         # ----------------------------------------------------
 
-        command_msg = RobotCommand()
-        command_msg.position = list(result.position)
-        self.command_pub.publish(command_msg)
-
-
-        # ----------------------------------------------------
-        # Sincronizamos sliders/entradas/matriz de la pestaña
-        # de cinemática directa con la nueva pose.
-        # ----------------------------------------------------
-
-        for i in range(min(self.num_joints, len(q_deg))):
-
-            self.target_deg[i] = q_deg[i]
-
-            self.sliders[i].set(q_deg[i])
-
-            self.slider_labels[i].config(
-                text=f"{q_deg[i]:.1f}°"
-            )
-
-            self.entries[i].delete(0, tk.END)
-            self.entries[i].insert(0, f"{q_deg[i]:.1f}")
-
-        self.update_kinematics()
-
-        if self.last_ik_newton_target is not None:
-            x_obj, y_obj, z_obj = self.last_ik_newton_target
-            self.update_mth_verification(
-                self.ikn_mth,
-                result.position[0], result.position[1], result.position[2],
-                x_obj, y_obj, z_obj
-            )
-            self.add_trail_point(x_obj, y_obj, z_obj)
-
-        if self._on_trajectory_ik_result('newton'):
-            return
-
-        self.show_ik_done_status(self.set_ik_newton_status, q_deg)
+        self._mover_ik(
+            'newton', q_deg, self.ikn_q_labels, self.ikn_mth,
+            self.set_ik_newton_status, self.last_ik_newton_target
+        )
 
 
     # ========================================================
@@ -3415,49 +3379,15 @@ class TeleopNode(Node):
 
 
         # ----------------------------------------------------
-        # Movemos el modelo en RViz por el mismo camino que las
-        # demás pestañas (kinematics_node -> control_node ->
-        # robot_state_publisher).
+        # Movemos la pierna de la pose actual al destino con la
+        # ley temporal elegida en "Tipo de desplazamiento" (ver
+        # apply_ik_result).
         # ----------------------------------------------------
 
-        command_msg = RobotCommand()
-        command_msg.position = list(result.position)
-        self.command_pub.publish(command_msg)
-
-
-        # ----------------------------------------------------
-        # Sincronizamos sliders/entradas/matriz de la pestaña
-        # de cinemática directa con la nueva pose.
-        # ----------------------------------------------------
-
-        for i in range(min(self.num_joints, len(q_deg))):
-
-            self.target_deg[i] = q_deg[i]
-
-            self.sliders[i].set(q_deg[i])
-
-            self.slider_labels[i].config(
-                text=f"{q_deg[i]:.1f}°"
-            )
-
-            self.entries[i].delete(0, tk.END)
-            self.entries[i].insert(0, f"{q_deg[i]:.1f}")
-
-        self.update_kinematics()
-
-        if self.last_ik_des_target is not None:
-            x_obj, y_obj, z_obj = self.last_ik_des_target
-            self.update_mth_verification(
-                self.ikd_mth,
-                result.position[0], result.position[1], result.position[2],
-                x_obj, y_obj, z_obj
-            )
-            self.add_trail_point(x_obj, y_obj, z_obj)
-
-        if self._on_trajectory_ik_result('des'):
-            return
-
-        self.show_ik_done_status(self.set_ik_des_status, q_deg)
+        self._mover_ik(
+            'des', q_deg, self.ikd_q_labels, self.ikd_mth,
+            self.set_ik_des_status, self.last_ik_des_target
+        )
 
 
     # ========================================================
@@ -3562,49 +3492,15 @@ class TeleopNode(Node):
 
 
         # ----------------------------------------------------
-        # Movemos el modelo en RViz por el mismo camino que las
-        # demás pestañas (kinematics_node -> control_node ->
-        # robot_state_publisher).
+        # Movemos la pierna de la pose actual al destino con la
+        # ley temporal elegida en "Tipo de desplazamiento" (ver
+        # apply_ik_result).
         # ----------------------------------------------------
 
-        command_msg = RobotCommand()
-        command_msg.position = list(result.position)
-        self.command_pub.publish(command_msg)
-
-
-        # ----------------------------------------------------
-        # Sincronizamos sliders/entradas/matriz de la pestaña
-        # de cinemática directa con la nueva pose.
-        # ----------------------------------------------------
-
-        for i in range(min(self.num_joints, len(q_deg))):
-
-            self.target_deg[i] = q_deg[i]
-
-            self.sliders[i].set(q_deg[i])
-
-            self.slider_labels[i].config(
-                text=f"{q_deg[i]:.1f}°"
-            )
-
-            self.entries[i].delete(0, tk.END)
-            self.entries[i].insert(0, f"{q_deg[i]:.1f}")
-
-        self.update_kinematics()
-
-        if self.last_ik_geom_target is not None:
-            x_obj, y_obj, z_obj = self.last_ik_geom_target
-            self.update_mth_verification(
-                self.ikg_mth,
-                result.position[0], result.position[1], result.position[2],
-                x_obj, y_obj, z_obj
-            )
-            self.add_trail_point(x_obj, y_obj, z_obj)
-
-        if self._on_trajectory_ik_result('geom'):
-            return
-
-        self.show_ik_done_status(self.set_ik_geom_status, q_deg)
+        self._mover_ik(
+            'geom', q_deg, self.ikg_q_labels, self.ikg_mth,
+            self.set_ik_geom_status, self.last_ik_geom_target
+        )
 
 
     # ========================================================
@@ -3716,49 +3612,15 @@ class TeleopNode(Node):
 
 
         # ----------------------------------------------------
-        # Movemos el modelo en RViz por el mismo camino que las
-        # demás pestañas (kinematics_node -> control_node ->
-        # robot_state_publisher).
+        # Movemos la pierna de la pose actual al destino con la
+        # ley temporal elegida en "Tipo de desplazamiento" (ver
+        # apply_ik_result).
         # ----------------------------------------------------
 
-        command_msg = RobotCommand()
-        command_msg.position = list(result.position)
-        self.command_pub.publish(command_msg)
-
-
-        # ----------------------------------------------------
-        # Sincronizamos sliders/entradas/matriz de la pestaña
-        # de cinemática directa con la nueva pose.
-        # ----------------------------------------------------
-
-        for i in range(min(self.num_joints, len(q_deg))):
-
-            self.target_deg[i] = q_deg[i]
-
-            self.sliders[i].set(q_deg[i])
-
-            self.slider_labels[i].config(
-                text=f"{q_deg[i]:.1f}°"
-            )
-
-            self.entries[i].delete(0, tk.END)
-            self.entries[i].insert(0, f"{q_deg[i]:.1f}")
-
-        self.update_kinematics()
-
-        if self.last_ik_grad_target is not None:
-            x_obj, y_obj, z_obj = self.last_ik_grad_target
-            self.update_mth_verification(
-                self.ikgr_mth,
-                result.position[0], result.position[1], result.position[2],
-                x_obj, y_obj, z_obj
-            )
-            self.add_trail_point(x_obj, y_obj, z_obj)
-
-        if self._on_trajectory_ik_result('grad'):
-            return
-
-        self.show_ik_done_status(self.set_ik_grad_status, q_deg)
+        self._mover_ik(
+            'grad', q_deg, self.ikgr_q_labels, self.ikgr_mth,
+            self.set_ik_grad_status, self.last_ik_grad_target
+        )
 
 
     # ========================================================
@@ -3800,6 +3662,13 @@ class TeleopNode(Node):
             f"Teleop pata bípedo - Pierna {self.leg_name}"
             + (f" - {method}" if method else "")
         )
+
+        # La pestaña "Trayectorias" necesita más ancho para sus
+        # gráficas: la ventana se agranda mientras está seleccionada.
+        if notebook.select() == str(self.tab_tray):
+            self.root.geometry("1180x860")
+        else:
+            self.root.geometry("980x740")
 
 
     # ========================================================
