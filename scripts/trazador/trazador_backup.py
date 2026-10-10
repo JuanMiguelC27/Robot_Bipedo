@@ -379,7 +379,7 @@ def load_perfiles():
     return perfiles_temporales
 
 
-LEYES = ("lineal", "cubico", "quintico")
+LEYES = ("lineal", "cubico", "quintico", "trapezoidal", "tiempo_minimo")
 
 
 def unreachable_points(leg, ik, side="left"):
