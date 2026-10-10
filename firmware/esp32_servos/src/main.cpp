@@ -78,8 +78,13 @@ float target_angle[NUM_SERVOS];
 float current_angle[NUM_SERVOS];
 uint16_t last_ticks[NUM_SERVOS];
 
-const float STEP_DEG = 0.3f;                 // grados por paso
-const unsigned long STEP_PERIOD_MS = 10;     // 0.3° / 10 ms = 30 °/s
+// Techo de velocidad de los servos reales. Antes 0.3°/10ms = 30 °/s;
+// se bajó a 20 °/s para dejar margen de seguridad sobre los ~15 °/s
+// que pide por defecto la interfaz (ver VEL_FIRMWARE_DEG_S en
+// trayectorias_ui.py), sin que un salto brusco del slider o de un
+// botón "Home" sea instantáneo.
+const float STEP_DEG = 0.2f;                 // grados por paso
+const unsigned long STEP_PERIOD_MS = 10;     // 0.2° / 10 ms = 20 °/s
 unsigned long last_step_time = 0;
 
 // Estado de la conexion con el agente

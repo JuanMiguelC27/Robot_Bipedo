@@ -7,12 +7,7 @@ Implementa los métodos de la clase "Manipulator Inverse kinematics II"
   1. Lineal                      q(t) = a1 t + a0
   2. Cúbico                      posición y velocidad inicial/final
   3. Quíntico (5º grado)         posición, velocidad y aceleración
-  4. Trapezoidal / LSPB          (lineal con ajuste parabólico): se da
-                                 la velocidad máxima, la aceleración o
-                                 el tiempo de mezcla t_b
-  5. Tiempo mínimo (bang-bang)   aceleración máxima
-  6. Puntos intermedios          cúbico con velocidades de paso, o
-                                 lineal con ajuste parabólico
+  4. Puntos intermedios          cúbico con velocidades de paso
 
 Cada perfil es un polinomio por tramos (clase Perfil) que se evalúa en
 posición, velocidad y aceleración. Las unidades son las que se le den
@@ -42,18 +37,15 @@ import numpy as np
 VEL_MAX_SERVO_DEG_S = 60.0 / 0.21
 
 METODOS = (
-    'lineal', 'cubico', 'quintico', 'trapezoidal', 'tiempo_minimo',
-    'puntos_cubico', 'puntos_parabolico',
+    'lineal', 'cubico', 'quintico',
+    'puntos_cubico',
 )
 
 NOMBRES = {
     'lineal': 'Lineal',
     'cubico': 'Cúbico',
     'quintico': 'Quíntico (5º grado)',
-    'trapezoidal': 'Trapezoidal / LSPB (lineal con ajuste parabólico)',
-    'tiempo_minimo': 'Tiempo mínimo (bang-bang)',
     'puntos_cubico': 'Puntos intermedios - cúbico',
-    'puntos_parabolico': 'Puntos intermedios - lineal con ajuste parabólico',
 }
 
 
@@ -182,64 +174,6 @@ def quintico(q0, qf, t0, tf, v0=0.0, vf=0.0, a0=0.0, af=0.0):
     return Perfil([(t0, tf, c)], 'quintico')
 
 
-def trapezoidal(q0, qf, t0, tf, vmax=None, amax=None, tb=None):
-    """Velocidad trapezoidal (LSPB, lineal con ajuste parabólico),
-    simétrica, con velocidad inicial y final nulas. Se da UNO de:
-    vmax (velocidad del tramo lineal), amax (aceleración de los tramos
-    parabólicos) o tb (tiempo de mezcla)."""
-    _validar_tiempos(t0, tf)
-    T = tf - t0
-    d = qf - q0
-    if abs(d) < 1e-12:
-        return Perfil([(t0, tf, [q0])], 'trapezoidal', {'tb': 0.0, 'vmax': 0.0, 'amax': 0.0})
-    s = math.copysign(1.0, d)
-    D = abs(d)
-    dados = [x is not None for x in (vmax, amax, tb)]
-    if sum(dados) != 1:
-        raise ErrorPerfil('para el perfil trapezoidal se da una sola de: vmax, aceleración o tb')
-    if vmax is not None:
-        v = abs(vmax)
-        if not D / T < v <= 2 * D / T + 1e-9:
-            raise ErrorPerfil(f'la velocidad máxima debe cumplir {D / T:.3g} < vmax ≤ {2 * D / T:.3g}')
-        tb_ = (v * T - D) / v
-    elif amax is not None:
-        a = abs(amax)
-        disc = a**2 * T**2 - 4 * a * D
-        if disc < -1e-9:
-            raise ErrorPerfil(f'aceleración insuficiente: hace falta al menos {4 * D / T**2:.3g}')
-        tb_ = T / 2 - math.sqrt(max(disc, 0.0)) / (2 * a)
-    else:
-        tb_ = float(tb)
-        if not 0 < tb_ <= T / 2 + 1e-9:
-            raise ErrorPerfil(f'el tiempo de mezcla debe cumplir 0 < tb ≤ {T / 2:.3g}')
-    tb_ = min(tb_, T / 2)
-    v = D / (T - tb_)
-    a = v / tb_
-    tramos = [(t0, t0 + tb_, [q0, 0.0, s * a / 2])]
-    if T - 2 * tb_ > 1e-9:
-        tramos.append((t0 + tb_, tf - tb_, [q0 + s * a * tb_**2 / 2, s * v]))
-    qb = qf - s * a * tb_**2 / 2
-    tramos.append((tf - tb_, tf, [qb, s * v, -s * a / 2]))
-    return Perfil(tramos, 'trapezoidal', {'tb': tb_, 'vmax': s * v, 'amax': s * a})
-
-
-def tiempo_minimo(q0, qf, t0, amax):
-    """Trayectoria de tiempo mínimo con aceleración máxima (bang-bang):
-    tf = t0 + 2·sqrt(|qf - q0| / amax)."""
-    a = abs(amax)
-    if a <= 0:
-        raise ErrorPerfil('la aceleración máxima debe ser positiva')
-    D = abs(qf - q0)
-    if D < 1e-12:
-        return Perfil([(t0, t0 + 1e-6, [q0])], 'tiempo_minimo', {'tf': t0, 'ts': t0})
-    T = 2 * math.sqrt(D / a)
-    s = math.copysign(1.0, qf - q0)
-    ts = T / 2
-    tramos = [(t0, t0 + ts, [q0, 0.0, s * a / 2]),
-              (t0 + ts, t0 + T, [q0 + s * a * ts**2 / 2, s * a * ts, -s * a / 2])]
-    return Perfil(tramos, 'tiempo_minimo', {'tf': t0 + T, 'ts': t0 + ts})
-
-
 # ----------------------------------------------------------------------
 # 6. Puntos intermedios
 # ----------------------------------------------------------------------
@@ -276,83 +210,6 @@ def cubico_puntos(qs, ts, vs=None, v0=0.0, vf=0.0):
     return Perfil(tramos, 'puntos_cubico', {'velocidades': list(map(float, vs))})
 
 
-def parabolico_puntos(qs, ts, acc):
-    """Lineal con ajuste parabólico por puntos intermedios (Craig, cap. 7;
-    diapositivas 66-73). Velocidad inicial y final nulas. La curva pasa
-    cerca de los puntos intermedios (no exactamente por ellos) y empieza
-    y termina exactamente en el primero y el último."""
-    qs, ts = list(map(float, qs)), list(map(float, ts))
-    n = len(qs)
-    if n != len(ts) or n < 2:
-        raise ErrorPerfil('hacen falta al menos 2 puntos, con un tiempo por punto')
-    if any(b <= a for a, b in zip(ts, ts[1:])):
-        raise ErrorPerfil('los tiempos de paso deben ser crecientes')
-    A = abs(float(acc))
-    if A <= 0:
-        raise ErrorPerfil('la aceleración debe ser positiva')
-    if n == 2:
-        p = trapezoidal(qs[0], qs[1], ts[0], ts[1], amax=A)
-        p.nombre = 'puntos_parabolico'
-        return p
-    dt = np.diff(ts)
-    sg = lambda x: 1.0 if x >= 0 else -1.0
-    tb = [0.0] * n
-    acc_k = [0.0] * n
-    v = [0.0] * (n - 1)
-    # Tramo inicial
-    acc_k[0] = sg(qs[1] - qs[0]) * A
-    disc = dt[0]**2 - 2 * (qs[1] - qs[0]) / acc_k[0] if acc_k[0] else dt[0]**2
-    if disc < 0:
-        raise ErrorPerfil(f'aceleración insuficiente en el primer tramo (≥ {2 * abs(qs[1] - qs[0]) / dt[0]**2:.3g})')
-    tb[0] = dt[0] - math.sqrt(disc)
-    v[0] = (qs[1] - qs[0]) / (dt[0] - 0.5 * tb[0])
-    # Tramo final
-    acc_k[-1] = sg(qs[-1] - qs[-2]) * A
-    disc = dt[-1]**2 - 2 * (qs[-1] - qs[-2]) / acc_k[-1] if acc_k[-1] else dt[-1]**2
-    if disc < 0:
-        raise ErrorPerfil(f'aceleración insuficiente en el último tramo (≥ {2 * abs(qs[-1] - qs[-2]) / dt[-1]**2:.3g})')
-    tb[-1] = dt[-1] - math.sqrt(disc)
-    v[-1] = (qs[-1] - qs[-2]) / (dt[-1] - 0.5 * tb[-1])
-    # Velocidades de los tramos lineales interiores
-    for k in range(1, n - 2):
-        v[k] = (qs[k + 1] - qs[k]) / dt[k]
-    # Mezclas interiores
-    for k in range(1, n - 1):
-        dv = v[k] - v[k - 1]
-        acc_k[k] = sg(dv) * A
-        tb[k] = dv / acc_k[k] if A else 0.0
-    # Duraciones de los tramos lineales
-    tl = []
-    for k in range(n - 1):
-        izq = tb[k] if k == 0 else 0.5 * tb[k]
-        der = tb[k + 1] if k + 1 == n - 1 else 0.5 * tb[k + 1]
-        tl.append(dt[k] - izq - der)
-    if min(tl) < -1e-9:
-        raise ErrorPerfil('aceleración insuficiente: las mezclas parabólicas se solapan; aumenta la aceleración')
-    # Construcción por tramos con continuidad de posición y velocidad.
-    # En la mezcla final la aceleración física es la opuesta a la de la
-    # fórmula de t_p (allí lleva el signo de q_fin - q_fin-1): frena.
-    acc_k[-1] = -acc_k[-1]
-    tramos = []
-    t = ts[0]
-    q = qs[0]
-    vel = 0.0
-    for k in range(n):
-        dur_b = tb[k]
-        if dur_b > 1e-12:
-            tramos.append((t, t + dur_b, [q, vel, acc_k[k] / 2]))
-            q = q + vel * dur_b + acc_k[k] * dur_b**2 / 2
-            vel = vel + acc_k[k] * dur_b
-            t = t + dur_b
-        if k < n - 1 and tl[k] > 1e-12:
-            tramos.append((t, t + tl[k], [q, v[k]]))
-            q = q + v[k] * tl[k]
-            vel = v[k]
-            t = t + tl[k]
-    return Perfil(tramos, 'puntos_parabolico',
-                  {'tb': tb, 'velocidades': v, 'tiempos_lineales': tl, 'aceleraciones': acc_k})
-
-
 # ----------------------------------------------------------------------
 # Construcción a partir de un método y sus parámetros
 # ----------------------------------------------------------------------
@@ -360,8 +217,7 @@ def parabolico_puntos(qs, ts, acc):
 def construir(metodo, q0, qf, t0=0.0, T=None, params=None):
     """Perfil punto a punto de una articulación.
 
-    params (según el método): v0, vf, a0, af, vmax, amax, tb.
-    Para 'tiempo_minimo' T se ignora (lo fija amax)."""
+    params (según el método): v0, vf, a0, af."""
     p = dict(params or {})
     tf = None if T is None else t0 + T
     if metodo == 'lineal':
@@ -370,17 +226,12 @@ def construir(metodo, q0, qf, t0=0.0, T=None, params=None):
         return cubico(q0, qf, t0, tf, p.get('v0', 0.0), p.get('vf', 0.0))
     if metodo == 'quintico':
         return quintico(q0, qf, t0, tf, p.get('v0', 0.0), p.get('vf', 0.0), p.get('a0', 0.0), p.get('af', 0.0))
-    if metodo == 'trapezoidal':
-        return trapezoidal(q0, qf, t0, tf, vmax=p.get('vmax'), amax=p.get('amax'), tb=p.get('tb'))
-    if metodo == 'tiempo_minimo':
-        return tiempo_minimo(q0, qf, t0, p['amax'])
     raise ErrorPerfil(f'método desconocido: {metodo}')
 
 
 def factor_pico(metodo):
     """Velocidad pico / velocidad media para un movimiento en reposo-reposo."""
-    return {'lineal': 1.0, 'cubico': 1.5, 'quintico': 1.875, 'trapezoidal': 1.5,
-            'tiempo_minimo': 2.0, 'puntos_cubico': 1.5, 'puntos_parabolico': 1.5}.get(metodo, 1.5)
+    return {'lineal': 1.0, 'cubico': 1.5, 'quintico': 1.875, 'puntos_cubico': 1.5}.get(metodo, 1.5)
 
 
 # ----------------------------------------------------------------------
@@ -390,29 +241,14 @@ def factor_pico(metodo):
 def planificar_ptp(q_ini, q_fin, metodo, T=None, params=None, coordinado=True, t0=0.0):
     """Perfiles de las articulaciones para ir de q_ini a q_fin.
 
-    coordinado=True (isócrono): todas empiezan y terminan a la vez. Solo
-    cambia algo en 'tiempo_minimo', donde cada articulación tendría su
-    propio tiempo: se toma el mayor y las demás usan un perfil
-    trapezoidal con la misma aceleración máxima."""
+    coordinado=True (isócrono): todas empiezan y terminan a la vez, con
+    el mismo T."""
     params = dict(params or {})
-    if metodo == 'tiempo_minimo':
-        perfiles = [tiempo_minimo(a, b, t0, params['amax']) for a, b in zip(q_ini, q_fin)]
-        if coordinado:
-            T = max(p.duracion for p in perfiles)
-            if T <= 1e-6:
-                return perfiles
-            perfiles = [trapezoidal(a, b, t0, t0 + T, amax=params['amax']) if abs(b - a) > 1e-9
-                        else Perfil([(t0, t0 + T, [a])], 'trapezoidal')
-                        for a, b in zip(q_ini, q_fin)]
-        return perfiles
     if T is None:
         raise ErrorPerfil('falta el tiempo del movimiento')
     out = []
     for a, b in zip(q_ini, q_fin):
         pj = dict(params)
-        if metodo == 'trapezoidal' and abs(b - a) < 1e-9:
-            out.append(Perfil([(t0, t0 + T, [a])], 'trapezoidal'))
-            continue
         out.append(construir(metodo, a, b, t0, T, pj))
     return out
 
@@ -425,8 +261,6 @@ def planificar_puntos(qs, ts, metodo, params=None):
     if metodo == 'puntos_cubico':
         return [cubico_puntos(qs[:, j], ts, v0=params.get('v0', 0.0), vf=params.get('vf', 0.0))
                 for j in range(qs.shape[1])]
-    if metodo == 'puntos_parabolico':
-        return [parabolico_puntos(qs[:, j], ts, params['amax']) for j in range(qs.shape[1])]
     raise ErrorPerfil(f'método de puntos intermedios desconocido: {metodo}')
 
 
@@ -453,17 +287,6 @@ def perfil_camino(L, metodo, vmax, amax=None):
         return Perfil([(0.0, 1e-6, [0.0])], metodo)
     if vmax <= 0:
         raise ErrorPerfil('la velocidad del lápiz debe ser positiva')
-    if metodo == 'trapezoidal':
-        if not amax or amax <= 0:
-            raise ErrorPerfil('el perfil trapezoidal necesita la aceleración del lápiz')
-        if L <= vmax**2 / amax:              # no llega a vmax: triangular
-            return tiempo_minimo(0.0, L, 0.0, amax)
-        T = L / vmax + vmax / amax
-        return trapezoidal(0.0, L, 0.0, T, vmax=vmax)
-    if metodo == 'tiempo_minimo':
-        if not amax or amax <= 0:
-            raise ErrorPerfil('el perfil de tiempo mínimo necesita la aceleración del lápiz')
-        return tiempo_minimo(0.0, L, 0.0, amax)
     T = factor_pico(metodo) * L / vmax
     # Aceleración pico de un movimiento reposo-reposo de longitud L en T:
     # cúbico 6·L/T², quíntico 10/sqrt(3)·L/T². Si se da amax, se alarga T
@@ -492,10 +315,6 @@ CONDICIONES_CAMINO = {
                'T = 1.5·L/v, o más si la aceleración superaría a.', ('v', 'a')),
     'quintico': ('5º grado, 6 condiciones: s(0) = 0, s(T) = L, ṡ(0) = ṡ(T) = 0, '
                  's̈(0) = s̈(T) = 0. T = 1.875·L/v, o más si la aceleración superaría a.', ('v', 'a')),
-    'trapezoidal': ('Acelera con a hasta v, sigue a v y frena con a. Si el trazo es corto '
-                    'no llega a v (perfil triangular).', ('v', 'a')),
-    'tiempo_minimo': ('Acelera con a la primera mitad y frena con a la segunda: '
-                      'T = 2·√(L/a). No usa v.', ('a',)),
 }
 
 
@@ -567,17 +386,12 @@ def ptp_muestreado(q_a, q_b, metodo, v_art, params, coordinado, dt):
     """Movimiento articular punto a punto con duración automática según
     la velocidad articular máxima v_art [°/s]."""
     delta = np.max(np.abs(np.asarray(q_b) - np.asarray(q_a)))
-    metodo_ptp = metodo if metodo in ('lineal', 'cubico', 'quintico', 'trapezoidal', 'tiempo_minimo') else 'cubico'
+    metodo_ptp = metodo if metodo in ('lineal', 'cubico', 'quintico') else 'cubico'
     if delta < 1e-6:
         return np.array([0.0]), np.array([q_a], float)
     p = dict(params)
-    if metodo_ptp == 'tiempo_minimo':
-        perfiles = planificar_ptp(q_a, q_b, metodo_ptp, params=p, coordinado=coordinado)
-    else:
-        T = max(0.2, factor_pico(metodo_ptp) * delta / v_art)
-        if metodo_ptp == 'trapezoidal':
-            p = {'tb': T / 3}
-        perfiles = planificar_ptp(q_a, q_b, metodo_ptp, T, p, coordinado)
+    T = max(0.2, factor_pico(metodo_ptp) * delta / v_art)
+    perfiles = planificar_ptp(q_a, q_b, metodo_ptp, T, p, coordinado)
     t, Q, _, _ = muestrear(perfiles, dt)
     return t - t[0], Q
 
@@ -663,8 +477,9 @@ def planificar_dibujo(puntos, side, t_actual_deg, ik, fk_pie,
     - Lápiz abajo (el papel es la altura más baja del archivo; la altura
       se mide a lo largo de 'arriba'): ley temporal
       cartesiana 'metodo_camino' en cada trazo, con velocidad v_lapiz
-      [mm/s] (y aceleración a_lapiz [mm/s²] si es trapezoidal), y
-      cinemática inversa en cada muestra. Con parar_en_esquinas, cada
+      [mm/s] (y aceleración a_lapiz [mm/s²] si el trazo es corto y la
+      curva la superaría), y cinemática inversa en cada muestra. Con
+      parar_en_esquinas, cada
       tramo entre esquinas (giro > umbral_esquina_deg) tiene su propia
       ley temporal y el lápiz se detiene en la esquina: así la
       aceleración no salta al cambiar de dirección. Con suavizar, cada

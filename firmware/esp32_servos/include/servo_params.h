@@ -65,7 +65,7 @@ struct ServoParams {
 
 static const ServoParams SERVO_PARAMS[NUM_SERVOS] = {
     // channel, home, min, max, offset, us0, usPerDeg, name
-    { 2, 180.0f, 165.0f, 270.0f, 0.0f, RDS_US0, RDS_US_PER_DEG, "Hip Roll"  },  // Junta 0 -> PWM2
+    { 2,   0.0f,   0.0f,  90.0f, 0.0f, RDS_US0, RDS_US_PER_DEG, "Hip Roll"  },  // Junta 0 -> PWM2
     { 1, 135.0f,  45.0f, 225.0f, 0.0f, RDS_US0, RDS_US_PER_DEG, "Hip Pitch" },  // Junta 1 -> PWM1
 #if SERVO_CANAL0_SG90
     // SG90: el teleop manda q3 + 135, así que q3 = 0° (135) queda

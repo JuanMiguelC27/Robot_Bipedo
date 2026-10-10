@@ -143,9 +143,9 @@ class ControlNode(Node):
         # El firmware (servo_params.h) recorta con sus propios
         # angleMin/angleMax en ese mismo sistema de grados.
         #
-        # REVISAR Hip Roll: el firmware espera 165..270
-        # (home 180); con offset 0 los comandos (0..90) quedan
-        # recortados a 165 en la ESP32.
+        # Hip Roll: q1 = 0 es el 0° físico del servo (sin
+        # offset). Hip Pitch / Knee: q = 0 es el home, el
+        # centro del servo (135° físicos).
         #
         # ====================================================
 

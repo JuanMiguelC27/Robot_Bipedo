@@ -152,23 +152,18 @@ def _load_trajectory_file(path):
 # la ley temporal elegida (perfiles_temporales.py). No se incluyen
 # los métodos de "puntos intermedios": aquí siempre hay un solo
 # tramo, de la pose actual al destino.
+#
+# Único parámetro editable: T (tiempo del movimiento). v0, vf, a0,
+# af NO se piden en la interfaz: quedan en 0, el caso reposo-reposo
+# (empieza y termina sin velocidad ni aceleración), que es el que
+# corresponde a un movimiento punto a punto como este.
 # ============================================================
 
 DT_MOVIMIENTO = 0.02   # 50 Hz, igual que la pestaña "Trayectorias"
 
 METODOS_DESPLAZAMIENTO = (
-    'lineal', 'cubico', 'quintico', 'trapezoidal', 'tiempo_minimo'
+    'lineal', 'cubico', 'quintico'
 )
-
-# Qué campos de parámetros (aparte de T) se habilitan para cada
-# método. 'trapezoidal' exige llenar uno solo de los tres.
-CAMPOS_DESPLAZAMIENTO = {
-    'lineal': (),
-    'cubico': ('v0', 'vf'),
-    'quintico': ('v0', 'vf', 'a0', 'af'),
-    'trapezoidal': ('vmax', 'amax', 'tb'),
-    'tiempo_minimo': ('amax',),
-}
 
 
 # ============================================================
@@ -1360,7 +1355,7 @@ class TeleopNode(Node):
             tab_ik,
             text="Aplicar a motores (HARDWARE)",
             bg='#ffdddd',
-            command=lambda: self.apply_to_hardware(self.set_ik_status)
+            command=lambda: self._aplicar_movimiento_hardware('alg', self.set_ik_status)
         )
 
         ik_hardware_button.pack(
@@ -1550,7 +1545,7 @@ class TeleopNode(Node):
             tab_ik_newton,
             text="Aplicar a motores (HARDWARE)",
             bg='#ffdddd',
-            command=lambda: self.apply_to_hardware(self.set_ik_newton_status)
+            command=lambda: self._aplicar_movimiento_hardware('newton', self.set_ik_newton_status)
         )
 
         ikn_hardware_button.pack(
@@ -1740,7 +1735,7 @@ class TeleopNode(Node):
             tab_ik_des,
             text="Aplicar a motores (HARDWARE)",
             bg='#ffdddd',
-            command=lambda: self.apply_to_hardware(self.set_ik_des_status)
+            command=lambda: self._aplicar_movimiento_hardware('des', self.set_ik_des_status)
         )
 
         ikd_hardware_button.pack(
@@ -1930,7 +1925,7 @@ class TeleopNode(Node):
             tab_ik_geom,
             text="Aplicar a motores (HARDWARE)",
             bg='#ffdddd',
-            command=lambda: self.apply_to_hardware(self.set_ik_geom_status)
+            command=lambda: self._aplicar_movimiento_hardware('geom', self.set_ik_geom_status)
         )
 
         ikg_hardware_button.pack(
@@ -2120,7 +2115,7 @@ class TeleopNode(Node):
             tab_ik_grad,
             text="Aplicar a motores (HARDWARE)",
             bg='#ffdddd',
-            command=lambda: self.apply_to_hardware(self.set_ik_grad_status)
+            command=lambda: self._aplicar_movimiento_hardware('grad', self.set_ik_grad_status)
         )
 
         ikgr_hardware_button.pack(
@@ -2580,9 +2575,9 @@ class TeleopNode(Node):
     #
     # Se llama una vez por cada pestaña de cinemática inversa.
     # Construye el selector de ley temporal (lineal / cúbico /
-    # quíntico / trapezoidal / tiempo mínimo) y sus campos de
-    # parámetros, para el movimiento articular de la pose actual
-    # hasta el punto calculado (ver _mover_ik).
+    # quíntico) y sus campos de parámetros, para el movimiento
+    # articular de la pose actual hasta el punto calculado
+    # (ver _mover_ik).
     # ========================================================
 
     def build_motion_type_frame(self, parent, key):
@@ -2650,15 +2645,11 @@ class TeleopNode(Node):
             campos[clave] = entry
 
         campo('T', "T (s):", 1, 0)
-        campo('v0', "v0 (°/s):", 1, 2)
-        campo('vf', "vf (°/s):", 2, 0)
-        campo('a0', "a0 (°/s²):", 2, 2)
-        campo('af', "af (°/s²):", 3, 0)
-        campo('vmax', "vmax (°/s):", 3, 2)
-        campo('amax', "amax (°/s²):", 4, 0)
-        campo('tb', "tb (s):", 4, 2)
 
-        campos['amax'].insert(0, "60")
+        # T por defecto: sin él, el movimiento falla con "falta el
+        # tiempo T" y la pierna no se mueve aunque la IK calcule q.
+        # v0, vf, a0, af no son editables: siempre reposo-reposo (0).
+        campos['T'].insert(0, "2")
 
         aviso_label = ttk.Label(
             motion_frame,
@@ -2721,40 +2712,26 @@ class TeleopNode(Node):
 
     # ========================================================
     # TIPO DE DESPLAZAMIENTO - HABILITAR CAMPOS SEGÚN EL MÉTODO
+    #
+    # Ya no hay campos que habilitar/deshabilitar (solo queda T,
+    # que siempre está activo): se deja la función porque la
+    # llama el combobox al cambiar de método, por si en el futuro
+    # un método necesita mostrar algo acá.
     # ========================================================
 
     def _actualizar_campos_desplazamiento(self, key):
 
         motion = self.ik_motion[key]
-        metodo = self._metodo_desplazamiento(key)
-        campos = motion['campos']
-
-        activos = set(CAMPOS_DESPLAZAMIENTO[metodo])
-
-        campos['T'].config(
-            state='disabled' if metodo == 'tiempo_minimo' else 'normal'
-        )
-
-        for clave in ('v0', 'vf', 'a0', 'af', 'vmax', 'amax', 'tb'):
-
-            campos[clave].config(
-                state='normal' if clave in activos else 'disabled'
-            )
-
-        if metodo == 'trapezoidal':
-            motion['aviso_label'].config(
-                text="Completa SOLO uno de: vmax, amax o tb."
-            )
-        else:
-            motion['aviso_label'].config(text="")
+        motion['aviso_label'].config(text="")
 
 
     # ========================================================
     # TIPO DE DESPLAZAMIENTO - LEER MÉTODO Y PARÁMETROS
     #
-    # Devuelve (metodo, T o None, params, coordinado). Lanza
-    # ValueError / pt.ErrorPerfil si algún campo requerido falta
-    # o no es numérico.
+    # Devuelve (metodo, T, params, coordinado). Lanza ValueError /
+    # pt.ErrorPerfil si T falta o no es numérico. v0, vf, a0, af no
+    # se leen de la interfaz: quedan en 0 (reposo-reposo), el
+    # default de cubico()/quintico() en perfiles_temporales.py.
     # ========================================================
 
     def _leer_parametros_movimiento(self, key):
@@ -2763,40 +2740,13 @@ class TeleopNode(Node):
         metodo = self._metodo_desplazamiento(key)
         campos = motion['campos']
 
-        def valor(clave):
-            texto = campos[clave].get().strip()
-            return float(texto) if texto else None
+        texto = campos['T'].get().strip()
+        T = float(texto) if texto else None
 
-        T = None
+        if T is None:
+            raise pt.ErrorPerfil('falta el tiempo T del movimiento')
 
-        if metodo != 'tiempo_minimo':
-
-            T = valor('T')
-
-            if T is None:
-                raise pt.ErrorPerfil('falta el tiempo T del movimiento')
-
-        params = {}
-
-        for clave in CAMPOS_DESPLAZAMIENTO[metodo]:
-
-            v = valor(clave)
-
-            if v is not None:
-                params[clave] = v
-
-        if metodo == 'trapezoidal':
-
-            if sum(c in params for c in ('vmax', 'amax', 'tb')) != 1:
-                raise pt.ErrorPerfil(
-                    'para trapezoidal completa SOLO uno de: vmax, amax o tb'
-                )
-
-        elif metodo == 'tiempo_minimo' and 'amax' not in params:
-
-            raise pt.ErrorPerfil('falta la aceleración máxima (amax)')
-
-        return metodo, T, params, motion['coord_var'].get()
+        return metodo, T, {}, motion['coord_var'].get()
 
 
     # ========================================================
@@ -2872,6 +2822,11 @@ class TeleopNode(Node):
             'mth_widgets': mth_widgets,
             'set_status': set_status,
             'objetivo_xyz': objetivo_xyz,
+            # Esto es solo preview en RViz. 'con_hardware' en False
+            # explícito: si una ejecución anterior lo había dejado en
+            # True, un Home/resultado de IK nuevo no debe mandar a los
+            # motores sin que se apriete "Aplicar a motores" de nuevo.
+            'con_hardware': False,
         })
 
         set_status(
@@ -2915,6 +2870,15 @@ class TeleopNode(Node):
         self.publish_target()
         self.update_kinematics()
 
+        # Si esta corrida viene de "Aplicar a motores" (ver
+        # _aplicar_movimiento_hardware), además de RViz se manda cada
+        # paso a /robot/hardware_command, igual que hace la pestaña
+        # "Trayectorias" con su casilla "+ motores". set_status se
+        # ignora acá (se usaría para "enviando...", 50 veces por
+        # segundo); el resultado final se avisa al terminar, abajo.
+        if motion.get('con_hardware'):
+            self.apply_to_hardware(lambda *_: None)
+
         self.show_ik_q_labels(motion['q_labels'], q)
 
         fin = idx >= len(Q) - 1
@@ -2936,7 +2900,9 @@ class TeleopNode(Node):
 
                 self.add_trail_point(x_obj, y_obj, z_obj)
 
-            self.show_ik_done_status(motion['set_status'], q)
+            self.show_ik_done_status(
+                motion['set_status'], q, motion.get('con_hardware', False)
+            )
 
             return
 
@@ -2946,6 +2912,77 @@ class TeleopNode(Node):
             int(DT_MOVIMIENTO * 1000),
             lambda: self._tick_ik_motion(key)
         )
+
+
+    # ========================================================
+    # APLICAR A MOTORES - MISMO MOVIMIENTO QUE EN RVIZ
+    #
+    # A diferencia de apply_to_hardware() (salto instantáneo al
+    # ángulo actual), esto repite el mismo tipo de perfil que
+    # _mover_ik usa para la animación de RViz, pero publicando
+    # también en /robot/hardware_command en cada uno de los pasos
+    # de 50 Hz - igual que hace la pestaña "Trayectorias" con su
+    # casilla "+ motores". No usa ningún tópico nuevo.
+    #
+    # Se recalcula desde la pose real actual (self.target_deg)
+    # hasta el mismo destino de la última animación (el último
+    # punto de motion['Q']), con el método y T que estén puestos
+    # AHORA en "Tipo de desplazamiento" - así, si ya se dejó
+    # terminar la animación en RViz, el tramo es trivial (ya está
+    # ahí); si se aprieta a mitad de camino, arranca desde ahí.
+    # ========================================================
+
+    def _aplicar_movimiento_hardware(self, key, set_status):
+
+        motion = self.ik_motion.get(key)
+
+        if motion is None or motion.get('Q') is None:
+
+            set_status(
+                "✗ Primero calculá un movimiento (Home o un resultado "
+                "de cinemática inversa).",
+                "red"
+            )
+
+            return
+
+        q_destino = [float(v) for v in motion['Q'][-1]]
+
+        self.stop_all_motion()
+
+        try:
+            metodo, T, params, coordinado = self._leer_parametros_movimiento(key)
+
+            perfiles = pt.planificar_ptp(
+                list(self.target_deg), q_destino, metodo, T, params,
+                coordinado
+            )
+
+            _, Q, _, _ = pt.muestrear(perfiles, DT_MOVIMIENTO)
+
+        except (pt.ErrorPerfil, ValueError, KeyError) as error:
+
+            set_status(
+                f"✗ {error or 'revisa los parámetros de la trayectoria'}",
+                "red"
+            )
+
+            return
+
+        motion.update({
+            'Q': Q,
+            'idx': 0,
+            'after_id': None,
+            'set_status': set_status,
+            'con_hardware': True,
+        })
+
+        set_status(
+            "Moviendo (RViz y motores)...",
+            "blue"
+        )
+
+        self._tick_ik_motion(key)
 
 
     # ========================================================
@@ -3139,7 +3176,7 @@ class TeleopNode(Node):
             )
 
 
-    def show_ik_done_status(self, set_status, q_deg):
+    def show_ik_done_status(self, set_status, q_deg, con_hardware=False):
 
         fuera = self.ik_limit_violations(q_deg)
 
@@ -3156,7 +3193,8 @@ class TeleopNode(Node):
         else:
 
             set_status(
-                "✓ Movimiento realizado.",
+                "✓ Movimiento realizado"
+                + (" y enviado a los motores." if con_hardware else "."),
                 "green"
             )
 

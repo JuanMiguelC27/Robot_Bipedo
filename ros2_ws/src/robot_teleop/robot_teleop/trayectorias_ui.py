@@ -64,11 +64,13 @@ DT = 0.02                       # 50 Hz
 NOMBRES_ART = ('roll', 'pitch', 'rodilla')
 COLORES = ('#1f77b4', '#d62728', '#2ca02c')
 
-# El firmware del ESP32 avanza 0.3° por actualización; con mensajes
-# cada 20 ms actualiza ~1 vez por mensaje: ~15 °/s como máximo.
-VEL_FIRMWARE_DEG_S = 15.0
+# Techo real del firmware del ESP32 (ver STEP_DEG/STEP_PERIOD_MS en
+# esp32_servos/src/main.cpp): 20 °/s. Se usa solo para el aviso de
+# _mostrar(); el valor por defecto del campo "v art." queda en 15°/s,
+# bastante por debajo, para no recortar el pico de la curva.
+VEL_FIRMWARE_DEG_S = 20.0
 
-METODOS_LEY = ('lineal', 'cubico', 'quintico', 'trapezoidal', 'tiempo_minimo')
+METODOS_LEY = ('lineal', 'cubico', 'quintico')
 
 
 def _float(entry, defecto=None):
@@ -145,8 +147,7 @@ class PestanaTrayectorias:
         self.cb_modo_dibujo = ttk.Combobox(
             d, textvariable=self.var_modo_dibujo, state='readonly', width=34,
             values=['Ley temporal cartesiana + articular',
-                    'Puntos intermedios articulares (cúbico)',
-                    'Puntos intermedios articulares (parabólico)'])
+                    'Puntos intermedios articulares (cúbico)'])
         self.cb_modo_dibujo.grid(row=1, column=0, columnspan=4, sticky='w', pady=(3, 0))
         self.cb_modo_dibujo.bind('<<ComboboxSelected>>', lambda e: self._actualizar_campos())
 
@@ -173,8 +174,7 @@ class PestanaTrayectorias:
             e.grid(row=fila, column=col + 1, sticky='w', padx=(2, 8))
             self.campos[clave] = e
 
-        campo('v_art', "v art. [°/s]", 1, 0, f"{VEL_FIRMWARE_DEG_S:g}")
-        campo('amax', "a máx [°/s²]", 1, 2, "60")
+        campo('v_art', "v art. [°/s]", 1, 0, "15")
         self.var_coord = tk.BooleanVar(value=True)
         ttk.Checkbutton(a, text="Coordinado (isócrono)", variable=self.var_coord
                         ).grid(row=2, column=0, columnspan=4, sticky='w')
@@ -262,11 +262,6 @@ class PestanaTrayectorias:
 
     def _actualizar_campos(self):
         ley_cartesiana = self.var_modo_dibujo.get().startswith('Ley')
-        parabolico = 'parabólico' in self.var_modo_dibujo.get()
-
-        # a máx: la usa el tiempo mínimo y la interpolación parabólica.
-        usa_amax = self._metodo() == 'tiempo_minimo' or parabolico
-        self.campos['amax'].config(state='normal' if usa_amax else 'disabled')
 
         # Ley temporal del lápiz: solo con ley cartesiana; en los modos de
         # puntos intermedios solo cuenta la velocidad del lápiz. v y a se
@@ -385,10 +380,9 @@ class PestanaTrayectorias:
     # ========================================================
 
     def _params_articulares(self):
-        """Método y parámetros de los movimientos articulares. La duración
-        sale de la velocidad articular; el tiempo mínimo usa a máx (y el
-        trapezoidal, un tiempo de mezcla de T/3)."""
-        return self._metodo(), {'amax': _float(self.campos['amax'], 60.0)}
+        """Método de los movimientos articulares. La duración sale de la
+        velocidad articular (v_art)."""
+        return self._metodo(), {}
 
     def _plan_dibujo(self):
         from robot_teleop.teleop_node import _load_trajectory_file
@@ -409,11 +403,10 @@ class PestanaTrayectorias:
                 umbral_esquina_deg=_float(self.e_esquina, 30.0),
                 suavizar=self.var_suavizar.get())
         else:
-            metodo = 'puntos_cubico' if 'cúbico' in modo else 'puntos_parabolico'
             plan = pt.planificar_por_puntos(
-                puntos, self.side, q0, ik_geometrico, posicion_pie, metodo,
+                puntos, self.side, q0, ik_geometrico, posicion_pie, 'puntos_cubico',
                 v_lapiz=_float(self.e_v_lapiz),
-                params={'amax': _float(self.campos['amax'], 400.0), 'v_articular': v_art}, dt=DT)
+                params={'v_articular': v_art}, dt=DT)
         V, A = plan.derivadas()
         tramos = "\n".join(f"{a:7.2f}-{b:7.2f} s  {d}" for a, b, d in plan.tramos[:40])
         if len(plan.tramos) > 40:
