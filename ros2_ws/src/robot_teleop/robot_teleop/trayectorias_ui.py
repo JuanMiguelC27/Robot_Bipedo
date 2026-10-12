@@ -144,12 +144,7 @@ class PestanaTrayectorias:
         self.lbl_archivo = ttk.Label(fa, text=os.path.basename(self.archivo), width=26)
         self.lbl_archivo.pack(side='left', padx=4)
         self.var_modo_dibujo = tk.StringVar(value='Ley temporal cartesiana + articular')
-        self.cb_modo_dibujo = ttk.Combobox(
-            d, textvariable=self.var_modo_dibujo, state='readonly', width=34,
-            values=['Ley temporal cartesiana + articular',
-                    'Puntos intermedios articulares (cúbico)'])
-        self.cb_modo_dibujo.grid(row=1, column=0, columnspan=4, sticky='w', pady=(3, 0))
-        self.cb_modo_dibujo.bind('<<ComboboxSelected>>', lambda e: self._actualizar_campos())
+        # Modo fijo: ley temporal cartesiana + articular.
 
         # ---------------- 3. Movimientos articulares ----------------
         # Aproximación al dibujo, desplazamientos con el lápiz levantado y
@@ -176,8 +171,7 @@ class PestanaTrayectorias:
 
         campo('v_art', "v art. [°/s]", 1, 0, "15")
         self.var_coord = tk.BooleanVar(value=True)
-        ttk.Checkbutton(a, text="Coordinado (isócrono)", variable=self.var_coord
-                        ).grid(row=2, column=0, columnspan=4, sticky='w')
+        # Coordinacion isocrona activa por defecto, sin opcion de desactivarla.
 
         # ---------------- 3. Ley temporal del lápiz ----------------
         l = ttk.LabelFrame(f, text="4. Ley temporal del lápiz (trazos)", padding=6,
@@ -326,7 +320,7 @@ class PestanaTrayectorias:
         try:
             m, p = self._params_articulares()
             t, Q = pt.ptp_muestreado(q0, destino, m, _float(self.campos['v_art']), p,
-                                     self.var_coord.get(), DT)
+                                     True, DT)
         except (pt.ErrorPerfil, ValueError, KeyError) as error:
             self.estado(f"✗ {error or 'revisa los parámetros (números)'}", 'red')
             return
@@ -398,7 +392,7 @@ class PestanaTrayectorias:
                 puntos, self.side, q0, ik_geometrico, posicion_pie,
                 metodo_camino=self._ley(), v_lapiz=_float(self.e_v_lapiz),
                 a_lapiz=_float(self.e_a_lapiz), metodo_articular=m, v_articular=v_art,
-                params_articular=p, coordinado=self.var_coord.get(), dt=DT,
+                params_articular=p, coordinado=True, dt=DT,
                 parar_en_esquinas=self.var_esquinas.get(),
                 umbral_esquina_deg=_float(self.e_esquina, 30.0),
                 suavizar=self.var_suavizar.get())

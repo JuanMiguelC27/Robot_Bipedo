@@ -48,12 +48,13 @@ class ControlNode(Node):
         #
         # Home ROS: [0, 0, 0] grados
         #
-        # Home /servo_commands: [-90, 90, 90]
+        # Home: ROS [0, 0, 0] -> valores físicos [-90, 90, 90]
         #
-        # serial_bridge convierte a:
-        #   BLDC       -> -90
-        #   Hip Pitch  -> a0
-        #   Knee Pitch -> b0
+        # Nuevos tópicos:
+        #   /robot/bldc_command   -> [-90]
+        #   /robot/servos_command -> [0, 0]
+        #
+        # El puente de servos agrega las letras 'a' y 'b'.
         #
         # Los offsets son referencias del protocolo,
         # no necesariamente angulos mecanicos absolutos.
@@ -67,6 +68,10 @@ class ControlNode(Node):
                 90.0    # Knee Pitch
             ]
         )
+
+        # Compatibilidad opcional con el puente antiguo.
+        # Desactivada por defecto para evitar comandos duplicados.
+        self.declare_parameter('publish_legacy_servo_commands', False)
 
         self.declare_parameter('verify_mode', True)
 
@@ -148,6 +153,21 @@ class ControlNode(Node):
             10
         )
 
+        # Los mensajes separados conservan una única orden de origen.
+        # BLDC: [angulo en grados en convención del firmware].
+        # Servos: [angulo_a, angulo_b], ambos en grados con centro 0.
+        self.bldc_pub = self.create_publisher(
+            Float32MultiArray,
+            '/robot/bldc_command',
+            10
+        )
+        self.servos_pub = self.create_publisher(
+            Float32MultiArray,
+            '/robot/servos_command',
+            10
+        )
+
+        # Tópico anterior, solo si se activa expresamente.
         self.servo_pub = self.create_publisher(
             Float32MultiArray,
             '/servo_commands',
@@ -175,7 +195,7 @@ class ControlNode(Node):
         self.get_logger().info(
             'Control iniciado | '
             f'Joints={self.n} | '
-            'Offsets=[-90, 90, 90]'
+            'Offsets=[-90, 90, 90] | tópicos separados activos'
         )
 
     # ==============================================
@@ -301,22 +321,39 @@ class ControlNode(Node):
                 )
                 return
 
-        out = Float32MultiArray()
-        out.data = physical
+        # Mantener la representación numérica de ambas ESP32.
+        # Las letras a/b se añaden únicamente al transmitir por USB.
+        if self.n != 3:
+            self.reject_hardware(
+                'La distribución BLDC/servos requiere exactamente 3 articulaciones'
+            )
+            return
 
-        self.servo_pub.publish(out)
+        bldc_out = Float32MultiArray()
+        bldc_out.data = [physical[0]]
+
+        servos_out = Float32MultiArray()
+        servos_out.data = [physical[1] - 90.0, physical[2] - 90.0]
+
+        self.bldc_pub.publish(bldc_out)
+        self.servos_pub.publish(servos_out)
+
+        if self.get_parameter('publish_legacy_servo_commands').value:
+            legacy_out = Float32MultiArray()
+            legacy_out.data = physical
+            self.servo_pub.publish(legacy_out)
 
         texto = ', '.join(
             f'{v:.1f}' for v in q_deg
         )
 
         self.get_logger().info(
-            f'Hardware q=[{texto}] -> {physical}'
+            f'Hardware q=[{texto}] -> BLDC={list(bldc_out.data)} | servos={list(servos_out.data)}'
         )
 
         status = String()
         status.data = (
-            f'OK|Enviado a los motores: [{texto}]'
+            f'OK|Consignas publicadas: [{texto}]'
         )
         self.hw_status_pub.publish(status)
 

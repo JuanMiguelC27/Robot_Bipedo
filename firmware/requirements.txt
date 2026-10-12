@@ -1,5 +1,0 @@
-pyside6
-pyqtgraph
-pyopengl
-pyserial
-numpy

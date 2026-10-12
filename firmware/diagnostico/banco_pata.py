@@ -2,11 +2,11 @@
 """
 Banco de Pata: interfaz grafica de la pata robotica
 (brushless WK8115-4 + cicloidal 1:11 + moteus-c1, y brazo con dos pares de servos)
-ESP32 + MCP2518FD (CAN) + PCA9685 (servos) + TCA9548A con dos AS5600 (encoders)
+Dos ESP32 independientes: BLDC con moteus CAN y servos con PCA9685 + dos AS5600
 
 Muestra la pata en 3D, el mando del brushless, los dos pares de servos (arriba y abajo)
 con sus encoders, bateria, temperaturas, corrientes, graficas de 20 s y la consola serie.
-Usa la telemetria del main.cpp (comando p1, lineas "@T,..." y "@S,...").
+Lee @T desde la ESP32 BLDC y @S desde la ESP32 Servos por puertos separados.
 Cada mando envia solo su comando: el brushless, el par de arriba y el par de abajo
 se mueven de forma independiente.
 
@@ -15,7 +15,7 @@ Instalar (una sola vez):
 
 Ejecutar:
     python3 banco_pata.py                 # abre en simulacion; conecta desde la ventana
-    python3 banco_pata.py /dev/ttyUSB0    # intenta conectar directo a ese puerto
+    python3 banco_pata.py                 # seleccionar puertos BLDC / Servos en pantalla
 
 Cierra el monitor de PlatformIO antes de conectar: solo un programa puede usar el puerto.
 """
@@ -630,7 +630,10 @@ class Ventana(QtWidgets.QMainWindow):
         self.s = {k: float("nan") for k in CAMPOS_S}
         self.s.update(a_b=0, b_b=0)
         self.hist_s = deque(maxlen=int(VENTANA_S * 30))
-        self.puerto = None; self.intentos_p1 = 0
+        self.puertos = {'bldc': None, 'servos': None}
+        self.ultimo_bldc = 0.0
+        self.ultimo_servos = 0.0
+        self.intentos_p1 = {'bldc': 0, 'servos': 0}
         self.mostrado = -90.0
 
         self.sim = Simulador(); self.sim.linea.connect(self.al_recibir)
@@ -641,11 +644,11 @@ class Ventana(QtWidgets.QMainWindow):
         self.t_3d = QtCore.QTimer(self); self.t_3d.timeout.connect(self.refrescar_3d); self.t_3d.start(33)
         self.t_graf = QtCore.QTimer(self); self.t_graf.timeout.connect(self.refrescar_graficas); self.t_graf.start(60)
         self.t_hz = QtCore.QTimer(self); self.t_hz.timeout.connect(self._medir_hz); self.t_hz.start(1000)
-        self.t_p1 = QtCore.QTimer(self); self.t_p1.timeout.connect(self._pedir_telemetria)
+        self.t_p1 = QtCore.QTimer(self); self.t_p1.timeout.connect(self._pedir_telemetria); self.t_p1.start(1800)
 
         self.sim.iniciar()
         if puerto_inicial:
-            QtCore.QTimer.singleShot(300, lambda: self.conectar(puerto_inicial))
+            QtCore.QTimer.singleShot(300, lambda: self.conectar("bldc", puerto_inicial))
 
     # ---------------- construccion
     def _construir(self):
@@ -656,20 +659,33 @@ class Ventana(QtWidgets.QMainWindow):
         # barra superior
         top = QtWidgets.QHBoxLayout(); top.setSpacing(10)
         t = QtWidgets.QLabel("Banco de Pata"); t.setObjectName("titulo")
-        s = QtWidgets.QLabel("WK8115-4 · cicloidal 1:11 · moteus-c1 · ESP32 + MCP2518FD"); s.setObjectName("sub")
+        s = QtWidgets.QLabel("Dos ESP32 · moteus CAN (BLDC) + PCA9685/AS5600 (servos)"); s.setObjectName("sub")
         marca = QtWidgets.QVBoxLayout(); marca.setSpacing(0); marca.addWidget(t); marca.addWidget(s)
         top.addLayout(marca); top.addStretch(1)
         self.chip_enlace = self._chip(); self.chip_bat = self._chip(); self.chip_temp = self._chip(); self.chip_falla = self._chip()
         for c in (self.chip_enlace, self.chip_bat, self.chip_temp, self.chip_falla):
             top.addWidget(c)
-        self.combo_puerto = QtWidgets.QComboBox(); self.combo_puerto.setMinimumWidth(150)
-        b_ref = QtWidgets.QPushButton("↻"); b_ref.setToolTip("Buscar puertos"); b_ref.clicked.connect(self.listar_puertos)
-        self.b_conectar = QtWidgets.QPushButton("Conectar ESP32"); self.b_conectar.setObjectName("primario")
-        self.b_conectar.clicked.connect(self.alternar_conexion)
-        b_todo = QtWidgets.QPushButton("PARAR TODO [x]"); b_todo.setObjectName("todo")
-        b_todo.setToolTip("Brushless libre y los cuatro servos sueltos"); b_todo.clicked.connect(lambda: self.enviar("x"))
+        self.combos = {}
+        self.botones_conectar = {}
+        for rol, etiqueta in (("bldc", "BLDC"), ("servos", "Servos")):
+            top.addWidget(QtWidgets.QLabel(etiqueta))
+            combo = QtWidgets.QComboBox()
+            combo.setMinimumWidth(135)
+            self.combos[rol] = combo
+            top.addWidget(combo)
+            boton = QtWidgets.QPushButton("Conectar")
+            boton.clicked.connect(lambda _=False, r=rol: self.alternar_conexion(r))
+            self.botones_conectar[rol] = boton
+            top.addWidget(boton)
+        b_ref = QtWidgets.QPushButton("↻")
+        b_ref.setToolTip("Actualizar puertos disponibles")
+        b_ref.clicked.connect(self.listar_puertos)
+        top.addWidget(b_ref)
+        b_todo = QtWidgets.QPushButton("PARAR TODO")
+        b_todo.setObjectName("todo")
+        b_todo.setToolTip("BLDC libre (puede caer), servos PWM off. No sustituye parada fisica")
+        b_todo.clicked.connect(self.parar_todo)
         top.addWidget(b_todo)
-        top.addWidget(self.combo_puerto); top.addWidget(b_ref); top.addWidget(self.b_conectar)
         principal.addLayout(top)
         self.listar_puertos()
 
@@ -769,13 +785,18 @@ class Ventana(QtWidgets.QMainWindow):
                                                ("Estado [e]", "e", "Imprimir el estado en la consola"),
                                                ("Calibracion [c]", "c", "Imprimir la calibracion guardada"))):
             b = QtWidgets.QPushButton(txt); b.setToolTip(ayuda)
+            if cmd in ("z", "h", "m"):
+                b.setEnabled(False)
+                b.setToolTip("No implementado en firmware esp32_bldc dividido")
             b.clicked.connect(lambda _=False, c=cmd: self.enviar(c)); rej.addWidget(b, i // 3, i % 3)
         lm.addLayout(rej)
         fila = QtWidgets.QHBoxLayout()
         lt = QtWidgets.QLabel("Limite de par (Nm)"); lt.setObjectName("tenue")
         self.spin_t = QtWidgets.QDoubleSpinBox(); self.spin_t.setRange(1, 40); self.spin_t.setDecimals(0); self.spin_t.setValue(30); self.spin_t.setFixedWidth(70)
-        b_t = QtWidgets.QPushButton("Aplicar"); b_t.clicked.connect(lambda: self.enviar(f"t{self.spin_t.value():.0f}"))
-        b_r = QtWidgets.QPushButton("Borrar calibracion"); b_r.clicked.connect(self.borrar)
+        b_t = QtWidgets.QPushButton("Aplicar"); b_t.setEnabled(False)
+        b_t.setToolTip("Cambio de limite no implementado en esp32_bldc dividido")
+        b_r = QtWidgets.QPushButton("Borrar calibracion"); b_r.setEnabled(False)
+        b_r.setToolTip("Borrado de calibracion no implementado en esp32_bldc dividido")
         fila.addWidget(lt); fila.addWidget(self.spin_t); fila.addWidget(b_t); fila.addStretch(1); fila.addWidget(b_r)
         lm.addLayout(fila)
         der.addWidget(pm)
@@ -814,7 +835,7 @@ class Ventana(QtWidgets.QMainWindow):
             lab = QtWidgets.QLabel(f"I{k + 1} --"); lab.setObjectName("dato"); lab.setToolTip(f"CURRENT{k + 1} del esquematico")
             fila.addWidget(lab); self.l_corr.append(lab)
         b_i = QtWidgets.QPushButton("Cero [i]"); b_i.setToolTip("Poner en cero los sensores (sin carga)")
-        b_i.clicked.connect(lambda: self.enviar("i")); fila.addWidget(b_i)
+        b_i.setEnabled(False); b_i.setToolTip("Sensores de corriente no disponibles en firmwares divididos"); fila.addWidget(b_i)
         le.addLayout(fila)
         der.addWidget(pe)
 
@@ -845,7 +866,7 @@ class Ventana(QtWidgets.QMainWindow):
         self.consola.setMinimumHeight(110)
         lc.addWidget(self.consola, 1)
         fila = QtWidgets.QHBoxLayout()
-        self.entrada = QtWidgets.QLineEdit(); self.entrada.setPlaceholderText("Comando (ej: 45, a0, a-30, b50, ax, s, x, e)")
+        self.entrada = QtWidgets.QLineEdit(); self.entrada.setPlaceholderText("Comandos: -45 o c para BLDC; a10 o b-10 para servos; e para ambos")
         self.entrada.returnPressed.connect(self._enviar_entrada)
         b = QtWidgets.QPushButton("Enviar"); b.clicked.connect(self._enviar_entrada)
         fila.addWidget(self.entrada, 1); fila.addWidget(b); lc.addLayout(fila)
@@ -890,8 +911,9 @@ class Ventana(QtWidgets.QMainWindow):
         fila.addStretch(1)
         b_x = QtWidgets.QPushButton(f"Soltar [{letra}x]"); b_x.setToolTip("Quita la fuerza de los dos servos de este par")
         b_x.clicked.connect(lambda: self.enviar(f"{letra}x"))
-        b_z = QtWidgets.QPushButton(f"Alinear [{letra}z]"); b_z.setToolTip("Alinea el encoder con la posicion actual del servo (quieto)")
-        b_z.clicked.connect(lambda: self.enviar(f"{letra}z"))
+        b_z = QtWidgets.QPushButton(f"Alinear [{letra}z]")
+        b_z.setToolTip("Pendiente de implementar alineacion persistente en firmware esp32_servos")
+        b_z.setEnabled(False)
         fila.addWidget(b_x); fila.addWidget(b_z)
         l.addLayout(fila)
         self.servo_w.append(dict(estado=estado, ind=ind, vals=vals, spin=sp))
@@ -936,85 +958,167 @@ class Ventana(QtWidgets.QMainWindow):
     def _chip(self):
         l = QtWidgets.QLabel("--"); l.setObjectName("chip"); return l
 
-    # ---------------- conexion
+    # ---------------- conexiones: dos USB separados
     def listar_puertos(self):
-        actual = self.combo_puerto.currentText() or self.ajustes.value("puerto", "")
-        self.combo_puerto.clear()
-        for p in sorted(serial.tools.list_ports.comports(), key=lambda p: ("USB" not in p.device and "ACM" not in p.device, p.device)):
-            if p.device.startswith("/dev/ttyS"):  # puertos internos de la placa madre, nunca son el ESP32
-                continue
-            self.combo_puerto.addItem(p.device)
-        if self.combo_puerto.count() == 0:
-            self.combo_puerto.addItem("/dev/ttyUSB0")
-        i = self.combo_puerto.findText(actual)
-        if i >= 0:
-            self.combo_puerto.setCurrentIndex(i)
+        disponibles = [p.device for p in serial.tools.list_ports.comports()
+                       if not p.device.startswith("/dev/ttyS")]
+        # Preferir nombres estables cuando existan; tambien acepta /dev/ttyUSBx.
+        from pathlib import Path
+        by_id = Path("/dev/serial/by-id")
+        if by_id.is_dir():
+            disponibles = sorted(str(p) for p in by_id.iterdir() if p.is_symlink()) + disponibles
+        disponibles = list(dict.fromkeys(disponibles))
+        for rol, combo in self.combos.items():
+            actual = combo.currentText() or self.ajustes.value(f"puerto_{rol}", "")
+            combo.clear()
+            combo.addItems(disponibles)
+            if not disponibles:
+                combo.addItem("/dev/ttyUSB0")
+            indice = combo.findText(actual)
+            if indice >= 0:
+                combo.setCurrentIndex(indice)
 
-    def alternar_conexion(self):
-        if self.puerto:
-            self.desconectar()
+    def alternar_conexion(self, rol):
+        if self.puertos[rol]:
+            self.desconectar(rol)
         else:
-            self.conectar(self.combo_puerto.currentText())
+            self.conectar(rol, self.combos[rol].currentText())
 
-    def conectar(self, nombre):
-        try:
-            self.puerto = PuertoSerie(nombre)
-        except (serial.SerialException, OSError) as e:
-            self.log(f"No se pudo abrir {nombre}: {e}", "er")
-            self.log("Cierra el monitor de PlatformIO y revisa que tu usuario este en el grupo dialout.", "er")
-            self.puerto = None
+    def conectar(self, rol, nombre):
+        if not nombre:
+            self.log(f"Selecciona un puerto para {rol}", "wn")
             return
-        self.sim.detener(); self.hist.clear(); self.hist_s.clear()
-        self.puerto.linea.connect(self.al_recibir)
-        self.puerto.perdido.connect(lambda e: self.desconectar(perdido=True))
-        self.ajustes.setValue("puerto", nombre)
-        self.log(f"Puerto {nombre} abierto a 115200. Esperando al ESP32...", "sys")
-        self.intentos_p1 = 0; self.t_p1.start(1800)
-        self.b_conectar.setText("Desconectar"); self.l_sim.hide()
+        for otro, puerto in self.puertos.items():
+            if puerto and otro != rol:
+                from os.path import realpath
+                if realpath(puerto.ser.port) == realpath(nombre):
+                    self.log("BLDC y servos no pueden usar el mismo puerto", "er")
+                    return
+        try:
+            puerto = PuertoSerie(nombre)
+        except (serial.SerialException, OSError) as exc:
+            self.log(f"No se pudo abrir {rol} en {nombre}: {exc}", "er")
+            return
+        self.puertos[rol] = puerto
+        puerto.linea.connect(lambda texto, r=rol: self.al_recibir(texto, r))
+        puerto.perdido.connect(lambda msg, r=rol: self.desconectar(r, perdido=True))
+        self.sim.detener()
+        if sum(bool(p) for p in self.puertos.values()) == 1:
+            self.d.update({k: float("nan") for k in CAMPOS})
+            self.d.update(modo=0, fault=0, banderas=0, can_ok=0, can_env=0)
+            self.s.update({k: float("nan") for k in CAMPOS_S})
+            self.s.update(a_b=0, b_b=0)
+            self.hist.clear(); self.hist_s.clear()
+        if rol == "bldc":
+            self.d.update({k: float("nan") for k in CAMPOS})
+            self.d.update(modo=0, fault=0, banderas=0, can_ok=0, can_env=0)
+            self.hist.clear()
+        else:
+            self.s.update({k: float("nan") for k in CAMPOS_S})
+            self.s.update(a_b=0, b_b=0)
+            self.hist_s.clear()
+        self.ajustes.setValue(f"puerto_{rol}", nombre)
+        self.botones_conectar[rol].setText("Desconectar")
+        self.intentos_p1[rol] = 0
+        self.l_sim.hide()
+        self.log(f"[{rol.upper()}] Conectado: {nombre} @ 115200", "sys")
+        # Telemetria habilitada para cada dispositivo, sin solicitar movimiento.
+        puerto.enviar("p1")
 
-    def desconectar(self, perdido=False):
-        self.t_p1.stop()
-        if self.puerto:
-            p = self.puerto; self.puerto = None
-            if not perdido:
-                p.cerrar()
-            else:
-                # cerrar igual el descriptor: si queda abierto, el puerto sigue ocupado
-                p._activo = False
+    def desconectar(self, rol, perdido=False):
+        puerto = self.puertos[rol]
+        self.puertos[rol] = None
+        if puerto:
+            if perdido:
+                puerto._activo = False
                 try:
-                    p.ser.close()
+                    puerto.ser.close()
                 except Exception:
                     pass
-        self.log("Se perdio la conexion con el ESP32." if perdido else "Desconectado. Vuelve la simulacion.", "sys")
-        self.hist.clear(); self.hist_s.clear(); self.sim.iniciar()
-        self.b_conectar.setText("Conectar ESP32"); self.l_sim.show()
+            else:
+                puerto.cerrar()
+        self.botones_conectar[rol].setText("Conectar")
+        if rol == "bldc":
+            self.ultimo_bldc = 0
+            self.d.update({k: float("nan") for k in CAMPOS})
+            self.d.update(modo=0, fault=0, banderas=0, can_ok=0, can_env=0)
+            self.hist.clear()
+        else:
+            self.ultimo_servos = 0
+            self.s.update({k: float("nan") for k in CAMPOS_S})
+            self.s.update(a_b=0, b_b=0)
+            self.hist_s.clear()
+        self.log(f"[{rol.upper()}] {'Conexion perdida' if perdido else 'Desconectado'}", "sys")
+        if not any(self.puertos.values()):
+            self.sim.iniciar()
+            self.l_sim.show()
 
     def _pedir_telemetria(self):
-        """El ESP32 se reinicia al abrir el puerto: pedir p1 hasta recibir datos."""
-        if time.monotonic() - self.ultimo_dato < 1.5:
-            return
-        self.intentos_p1 += 1
-        if self.intentos_p1 > 12:
-            self.t_p1.stop()
-            self.log("El ESP32 no envia telemetria. Carga el main.cpp nuevo (comando p1).", "er")
-            return
-        self.enviar("p1", eco=False)
+        tiempos = {"bldc": self.ultimo_bldc, "servos": self.ultimo_servos}
+        for rol, puerto in self.puertos.items():
+            if not puerto or time.monotonic() - tiempos[rol] < 1.5:
+                continue
+            if self.intentos_p1[rol] < 12:
+                self.intentos_p1[rol] += 1
+                try:
+                    puerto.enviar("p1")
+                except (serial.SerialException, OSError) as exc:
+                    self.log(f"[{rol}] Error p1: {exc}", "er")
+            elif self.intentos_p1[rol] == 12:
+                self.intentos_p1[rol] += 1
+                self.log(f"[{rol}] Sin telemetria; revisa firmware y protocolo", "wn")
 
     def enviar(self, cmd, eco=True):
+        cmd = cmd.strip()
+        if not cmd:
+            return
         if eco:
             self.log("> " + cmd, "tx")
-        if self.puerto:
-            try:
-                self.puerto.enviar(cmd)
-            except (serial.SerialException, OSError) as e:
-                self.log(f"Error al enviar: {e}", "er")
-        else:
+        if not any(self.puertos.values()):
             self.sim.enviar(cmd)
+            return
+        c = cmd[0].lower()
+        if c in ("a", "b"):
+            roles = ("servos",)
+        elif c == "x":
+            self.parar_todo()
+            return
+        elif cmd in ("e", "q", "p1", "p0", "?"):
+            roles = ("bldc", "servos")
+        elif c == "i":
+            self.log("Lectura de corriente 'i' no disponible en el firmware dividido", "wn")
+            return
+        else:
+            roles = ("bldc",)
+        for rol in roles:
+            puerto = self.puertos[rol]
+            if not puerto:
+                self.log(f"[{rol.upper()}] No conectado; comando omitido", "wn")
+                continue
+            try:
+                puerto.enviar(cmd)
+            except (serial.SerialException, OSError) as exc:
+                self.log(f"[{rol.upper()}] Fallo al escribir: {exc}", "er")
+
+    def parar_todo(self):
+        # IMPORTANTE: soltar el BLDC elimina el par de soporte de la pierna.
+        if not any(self.puertos.values()):
+            self.sim.enviar("x")
+            return
+        for rol, comando in (("bldc", "s"), ("servos", "x")):
+            puerto = self.puertos[rol]
+            if puerto:
+                try:
+                    puerto.enviar(comando)
+                    self.log(f"[{rol.upper()}] > {comando}", "tx")
+                except (serial.SerialException, OSError) as exc:
+                    self.log(f"[{rol.upper()}] Error: {exc}", "er")
 
     def _enviar_entrada(self):
         t = self.entrada.text().strip()
         if t:
-            self.enviar(t); self.entrada.clear()
+            self.enviar(t)
+            self.entrada.clear()
 
     def ir(self, a):
         a = max(-90.0, min(90.0, float(a)))
@@ -1022,14 +1126,17 @@ class Ventana(QtWidgets.QMainWindow):
         self.enviar(f"{a:g}")
 
     def borrar(self):
-        r = QtWidgets.QMessageBox.question(self, "Borrar calibracion",
-                                           "Se borran el cero, el sentido y la gravedad guardados en el ESP32. ¿Continuar?")
+        r = QtWidgets.QMessageBox.question(
+            self, "Borrar calibracion",
+            "Se borraria la calibracion del BLDC. Proceder solo con el robot asegurado. ¿Continuar?")
         if r == QtWidgets.QMessageBox.Yes:
             self.enviar("r")
 
     # ---------------- datos
-    def al_recibir(self, linea):
+    def al_recibir(self, linea, origen="sim"):
         if linea.startswith("@T,"):
+            if origen == "servos":
+                return
             f = linea.split(",")
             if len(f) < 21:
                 return
@@ -1040,12 +1147,15 @@ class Ventana(QtWidgets.QMainWindow):
             self.d.update(zip(CAMPOS, vals))
             for k in ("modo", "fault", "banderas"):
                 self.d[k] = int(self.d[k])
-            self.ultimo_dato = time.monotonic()
+            self.ultimo_dato = self.ultimo_bldc = time.monotonic()
+            self.intentos_p1["bldc"] = 0
             pos = bool(self.d["banderas"] & 8)
             self.hist.append((self.ultimo_dato, self.d["ang"], self.d["dest"] if pos else float("nan"),
                               self.d["par"], self.d["ff"], self.d["iq"]))
             return
         if linea.startswith("@S,"):
+            if origen == "bldc":
+                return
             f = linea.split(",")
             if len(f) < 15:
                 return
@@ -1054,17 +1164,21 @@ class Ventana(QtWidgets.QMainWindow):
             except ValueError:
                 return
             self.s.update(zip(CAMPOS_S, vals))
-            self.ultimo_dato = time.monotonic(); self.cuenta += 1
+            self.ultimo_dato = self.ultimo_servos = time.monotonic(); self.cuenta += 1
+            self.intentos_p1["servos"] = 0
             s = self.s
             a_on, b_on = int(s["a_b"]) & 1, int(s["b_b"]) & 1
-            self.hist_s.append((self.ultimo_dato, s["a_enc"], s["a_cmd"] if a_on else float("nan"),
-                                s["b_enc"], s["b_cmd"] if b_on else float("nan")))
+            self.hist_s.append((self.ultimo_dato,
+                                s["a_enc"] if int(s["a_b"]) & 32 else float("nan"),
+                                s["a_cmd"] if a_on else float("nan"),
+                                s["b_enc"] if int(s["b_b"]) & 32 else float("nan"),
+                                s["b_cmd"] if b_on else float("nan")))
             return
         if linea.startswith(">"):
             return
         if linea.strip():
             clase = "wn" if linea.strip().startswith(("ERROR", "ATENCION", "No llego", "Comando no", "Angulo fuera", "Brushless no", "Servos no", "El encoder", "PARAR TODO")) else None
-            self.log(linea, clase)
+            self.log(f"[{origen.upper()}] {linea}" if origen != "sim" else linea, clase)
 
     def log(self, texto, clase=None):
         col = {"tx": C["target"], "wn": C["warn"], "er": C["crit"], "sys": C["muted"]}.get(clase, C["fg"])
@@ -1080,25 +1194,30 @@ class Ventana(QtWidgets.QMainWindow):
     # ---------------- refresco de pantalla
     def refrescar(self):
         d = self.d
-        vivo = time.monotonic() - self.ultimo_dato < 1.5
+        now = time.monotonic()
+        sim = not any(self.puertos.values())
+        vivo_bldc = sim or bool(self.puertos["bldc"] and now - self.ultimo_bldc < 1.5)
+        vivo_servos = sim or bool(self.puertos["servos"] and now - self.ultimo_servos < 1.5)
+        vivo = vivo_bldc
         pos = bool(d["banderas"] & 8)
-        if not self.puerto:
+        if sim:
             self.chip_enlace.setText("● Simulacion"); chip_estilo(self.chip_enlace, "warn")
-        elif vivo:
-            self.chip_enlace.setText(f"● ESP32 en vivo · {self.hz} Hz"); chip_estilo(self.chip_enlace, "ok")
         else:
-            self.chip_enlace.setText("● Sin datos"); chip_estilo(self.chip_enlace, "crit")
-        self.l_hz.setText(f"{self.hz} Hz" if vivo else "sin datos")
+            a = "OK" if vivo_bldc else "SIN DATOS"
+            b = "OK" if vivo_servos else "SIN DATOS"
+            self.chip_enlace.setText(f"BLDC {a} · Servos {b}")
+            chip_estilo(self.chip_enlace, "ok" if vivo_bldc and vivo_servos else "warn")
+        self.l_hz.setText(f"{self.hz} Hz" if vivo_bldc else "sin datos")
 
         self.refrescar_servos()
-        self.l_ang.setText(fmt(d["ang"], 1) + "°")
+        self.l_ang.setText((fmt(d["ang"], 1) + "°") if vivo_bldc else "--")
         self.l_dest.setText("Destino:  " + (fmt(d["dest"], 1) + "°" if pos else "--"))
         self.l_err.setText("Error:  " + (fmt(d["dest"] - d["ang"], 2) + "°" if pos else "--"))
         estado = "Midiendo gravedad" if d["banderas"] & 16 else "En movimiento" if d["banderas"] & 64 else "Sostenida" if pos else "Motor libre"
         self.l_modo.setText(f"Modo {MODOS.get(d['modo'], d['modo'])} · {estado} · Compensacion {fmt(d['ff'], 2)} Nm")
 
         for lbl, bit, txt in ((self.f_cero, 1, "Cero guardado"), (self.f_sent, 2, "Sentido"), (self.f_ver, 4, "Cero verificado")):
-            ok = bool(d["banderas"] & bit)
+            ok = vivo_bldc and bool(d["banderas"] & bit)
             lbl.setText(("✓ " if ok else "! ") + txt)
             lbl.setStyleSheet(f"padding:3px 8px; border-radius:4px; background:{'#173226' if ok else '#3a3017'};"
                               f"color:{C['fg']};")
@@ -1118,7 +1237,10 @@ class Ventana(QtWidgets.QMainWindow):
         self.kv["par"].setStyleSheet(f"color:{C['crit']}" if abs(d["par"] or 0) > 0.9 * d["tmax"] else "")
 
         f = d["fault"]
-        if f:
+        if not vivo_bldc:
+            self.l_falla.setText("<b>Sin telemetria reciente del moteus.</b>")
+            self.chip_falla.setText("● BLDC sin datos"); chip_estilo(self.chip_falla, "warn")
+        elif f:
             nombre, ayuda = FALLAS.get(f, (f"Codigo {f}", ""))
             self.l_falla.setText(f"<b>Fault {f}: {nombre}.</b> {ayuda}")
             self.chip_falla.setText(f"● Fault {f} · {nombre}"); chip_estilo(self.chip_falla, "warn" if f >= 96 else "crit")
@@ -1187,8 +1309,12 @@ class Ventana(QtWidgets.QMainWindow):
                 w.setYRange(mn, mx * 1.05 if mx > 0 else mx, padding=0.02)
 
     def closeEvent(self, e):
-        if self.puerto:
-            self.puerto.cerrar()
+        self.sim.detener()
+        for rol in ("bldc", "servos"):
+            puerto = self.puertos.get(rol)
+            if puerto:
+                puerto.cerrar()
+                self.puertos[rol] = None
         super().closeEvent(e)
 
 

@@ -32,6 +32,7 @@
 import math
 import os
 import threading
+import time
 
 import rclpy
 from rclpy.node import Node
@@ -39,7 +40,7 @@ from rclpy.node import Node
 from robot_interfaces.msg import (
     RobotCommand, JointState, JointTarget, IKResult, IKJacobTarget
 )
-from std_msgs.msg import Float32MultiArray, String
+from std_msgs.msg import Float32MultiArray, Float64MultiArray, String
 from geometry_msgs.msg import Point
 from visualization_msgs.msg import Marker
 
@@ -299,6 +300,17 @@ class TeleopNode(Node):
         ]
 
         self.has_real_state = False
+        # Nunca representar lecturas no recibidas como cero mecánico.
+        self.real_valid = [False] * self.num_joints
+        self.real_updated_at = [None] * self.num_joints
+        self.real_timeout_sec = 2.0  # Solo seguridad de comunicación / semilla IK
+        self.real_sim_tolerance_deg = 2.0  # Umbral visual encoder vs RViz
+        self.has_sim_state = False
+        # Las cinco pestañas comparten estados medidos y simulados.
+        self.ik_result_panels = {}
+        # Fuente de la semilla para los dos solvers iterativos.
+        # Se crean las StringVar después de inicializar tk.Tk().
+        self.ik_seed_sources = {}
 
 
         # ====================================================
@@ -377,6 +389,26 @@ class TeleopNode(Node):
             10
         )
 
+        # Arquitectura de DOS ESP32. El serial_bridge publica ángulos
+        # del BLDC en convención del firmware (-90° = Home ROS 0°),
+        # y de servos en convención relativa al cero de sus AS5600.
+        # Se descartan valores sin alineación (el puente los filtra).
+        self.bldc_feedback_sub = self.create_subscription(
+            Float32MultiArray, '/robot/bldc_state',
+            self.on_bldc_state, 10
+        )
+        self.servos_feedback_sub = self.create_subscription(
+            Float32MultiArray, '/robot/servos_state',
+            self.on_servos_state, 10
+        )
+
+
+        # Diagnóstico de referencia BLDC (solo lectura; sin acceso serial directo).
+        self.bldc_reference_message = None
+        self.bldc_reference_sub = self.create_subscription(
+            String, '/robot/bldc_reference_status',
+            self.on_bldc_reference_status, 10
+        )
 
         # ====================================================
         # CINEMÁTICA INVERSA (vía ik_node, por tópicos)
@@ -386,6 +418,10 @@ class TeleopNode(Node):
             Point,
             '/robot/ik_target',
             10
+        )
+
+        self.ik_target_pub_branch = self.create_publisher(
+            Float64MultiArray, '/robot/ik_target_branch', 10
         )
 
         self.ik_result_sub = self.create_subscription(
@@ -473,6 +509,10 @@ class TeleopNode(Node):
             10
         )
 
+        self.ik_des_target_pub_branch = self.create_publisher(
+            Float64MultiArray, '/robot/ik_des_target_branch', 10
+        )
+
         self.ik_des_result_sub = self.create_subscription(
             IKResult,
             '/robot/ik_des_result',
@@ -492,6 +532,10 @@ class TeleopNode(Node):
             Point,
             '/robot/ik_geom_target',
             10
+        )
+
+        self.ik_geom_target_pub_branch = self.create_publisher(
+            Float64MultiArray, '/robot/ik_geom_target_branch', 10
         )
 
         self.ik_geom_result_sub = self.create_subscription(
@@ -685,36 +729,16 @@ class TeleopNode(Node):
             padding=8
         )
 
-        notebook.add(
-            tab_fk,
-            text="Cinemática directa"
-        )
-
-        notebook.add(
-            tab_ik,
-            text="CI Algebraico"
-        )
-
-        notebook.add(
-            tab_ik_newton,
-            text="CI Newton"
-        )
-
-        notebook.add(
-            tab_ik_des,
-            text="CI Desacople"
-        )
-
-        notebook.add(
-            tab_ik_geom,
-            text="CI Geométrico"
-        )
-
-        notebook.add(
-            tab_ik_grad,
-            text="CI Gradiente descendente"
-        )
-
+        # Orden solicitado: CD, Geométrico, Algebraico, MTH, Newton, Gradiente, Trayectorias.
+        for pagina, etiqueta in (
+            (tab_fk, "Cinemática directa"),
+            (tab_ik_geom, "CI Geométrico"),
+            (tab_ik, "CI Algebraico"),
+            (tab_ik_des, "CI MTH Desacople"),
+            (tab_ik_newton, "CI Newton"),
+            (tab_ik_grad, "CI Gradiente Descendente"),
+        ):
+            notebook.add(pagina, text=etiqueta)
 
         # ----------------------------------------------------
         # El título de la ventana muestra el método de la
@@ -1203,6 +1227,31 @@ class TeleopNode(Node):
 
 
         # ====================================================
+        # DIAGNÓSTICO DE REFERENCIA BLDC (SOLO LECTURA)
+        # La calibración y su confirmación NO se ejecutan desde esta GUI.
+        # ====================================================
+        ref_frame = ttk.LabelFrame(
+            tab_fk, text="Referencia angular BLDC — diagnóstico",
+            padding=8, style='Section.TLabelframe'
+        )
+        ref_frame.pack(fill='x', pady=(8, 4))
+        self.bldc_ref_state_label = ttk.Label(
+            ref_frame, text="Estado: esperando serial_bridge_bldc..."
+        )
+        self.bldc_ref_state_label.pack(anchor='w', pady=(0, 4))
+        self.bldc_ref_saved_label = ttk.Label(
+            ref_frame, text="Referencia almacenada: sin información"
+        )
+        self.bldc_ref_saved_label.pack(anchor='w', pady=(0, 4))
+        self.bldc_ref_can_label = ttk.Label(
+            ref_frame, text="CAN: esperando información"
+        )
+        self.bldc_ref_can_label.pack(anchor='w', pady=(0, 4))
+        self.bldc_ref_angle_label = ttk.Label(
+            ref_frame, text="Posición CAN: sin información"
+        )
+        self.bldc_ref_angle_label.pack(anchor='w', pady=(0, 4))
+        # ====================================================
         # PESTAÑA DE CINEMÁTICA INVERSA
         # ====================================================
 
@@ -1291,6 +1340,9 @@ class TeleopNode(Node):
         # RESULTADO (q1, q2, q3)
         # ----------------------------------------------------
 
+        # Rama cinemática usada únicamente al solicitar la solución analítica.
+        self._crear_selector_codo(tab_ik, 'alg')
+
         ik_result_frame = ttk.LabelFrame(
             tab_ik,
             text="Resultado",
@@ -1303,43 +1355,10 @@ class TeleopNode(Node):
             pady=(0, 8)
         )
 
-        self.ik_q_labels = []
-
-        for i, name in enumerate(
-            ('q1 (Hip Roll)', 'q2 (Hip Pitch)', 'q3 (Knee)')
-        ):
-
-            label = ttk.Label(
-                ik_result_frame,
-                text=f"{name}:",
-                width=16
-            )
-
-            label.grid(
-                row=i,
-                column=0,
-                padx=(5, 5),
-                pady=3,
-                sticky='w'
-            )
-
-            value_label = ttk.Label(
-                ik_result_frame,
-                text="--",
-                width=10
-            )
-
-            value_label.grid(
-                row=i,
-                column=1,
-                padx=(0, 5),
-                pady=3,
-                sticky='w'
-            )
-
-            self.ik_q_labels.append(
-                value_label
-            )
+        # Una misma tabla en cada método: medición, simulación y objetivo.
+        self.ik_q_labels = self._build_ik_result_table(
+            ik_result_frame, 'alg'
+        )
 
 
         # ----------------------------------------------------
@@ -1486,6 +1505,10 @@ class TeleopNode(Node):
         # RESULTADO (q1, q2, q3)
         # ----------------------------------------------------
 
+        # Dos opciones excluyentes para la semilla de IK.
+        # Ninguna selección activa motores ni crea una conexión serial.
+        self._build_ik_seed_selector(tab_ik_newton, 'newton')
+
         ikn_result_frame = ttk.LabelFrame(
             tab_ik_newton,
             text="Resultado",
@@ -1498,43 +1521,10 @@ class TeleopNode(Node):
             pady=(0, 8)
         )
 
-        self.ikn_q_labels = []
-
-        for i, name in enumerate(
-            ('q1 (Hip Roll)', 'q2 (Hip Pitch)', 'q3 (Knee)')
-        ):
-
-            label = ttk.Label(
-                ikn_result_frame,
-                text=f"{name}:",
-                width=16
-            )
-
-            label.grid(
-                row=i,
-                column=0,
-                padx=(5, 5),
-                pady=3,
-                sticky='w'
-            )
-
-            value_label = ttk.Label(
-                ikn_result_frame,
-                text="--",
-                width=10
-            )
-
-            value_label.grid(
-                row=i,
-                column=1,
-                padx=(0, 5),
-                pady=3,
-                sticky='w'
-            )
-
-            self.ikn_q_labels.append(
-                value_label
-            )
+        # Una misma tabla en cada método: medición, simulación y objetivo.
+        self.ikn_q_labels = self._build_ik_result_table(
+            ikn_result_frame, 'newton'
+        )
 
 
         # ----------------------------------------------------
@@ -1676,6 +1666,9 @@ class TeleopNode(Node):
         # RESULTADO (q1, q2, q3)
         # ----------------------------------------------------
 
+        # Rama cinemática usada únicamente al solicitar la solución analítica.
+        self._crear_selector_codo(tab_ik_des, 'des')
+
         ikd_result_frame = ttk.LabelFrame(
             tab_ik_des,
             text="Resultado",
@@ -1688,43 +1681,10 @@ class TeleopNode(Node):
             pady=(0, 8)
         )
 
-        self.ikd_q_labels = []
-
-        for i, name in enumerate(
-            ('q1 (Hip Roll)', 'q2 (Hip Pitch)', 'q3 (Knee)')
-        ):
-
-            label = ttk.Label(
-                ikd_result_frame,
-                text=f"{name}:",
-                width=16
-            )
-
-            label.grid(
-                row=i,
-                column=0,
-                padx=(5, 5),
-                pady=3,
-                sticky='w'
-            )
-
-            value_label = ttk.Label(
-                ikd_result_frame,
-                text="--",
-                width=10
-            )
-
-            value_label.grid(
-                row=i,
-                column=1,
-                padx=(0, 5),
-                pady=3,
-                sticky='w'
-            )
-
-            self.ikd_q_labels.append(
-                value_label
-            )
+        # Una misma tabla en cada método: medición, simulación y objetivo.
+        self.ikd_q_labels = self._build_ik_result_table(
+            ikd_result_frame, 'des'
+        )
 
 
         # ----------------------------------------------------
@@ -1866,6 +1826,9 @@ class TeleopNode(Node):
         # RESULTADO (q1, q2, q3)
         # ----------------------------------------------------
 
+        # Rama cinemática usada únicamente al solicitar la solución analítica.
+        self._crear_selector_codo(tab_ik_geom, 'geom')
+
         ikg_result_frame = ttk.LabelFrame(
             tab_ik_geom,
             text="Resultado",
@@ -1878,43 +1841,10 @@ class TeleopNode(Node):
             pady=(0, 8)
         )
 
-        self.ikg_q_labels = []
-
-        for i, name in enumerate(
-            ('q1 (Hip Roll)', 'q2 (Hip Pitch)', 'q3 (Knee)')
-        ):
-
-            label = ttk.Label(
-                ikg_result_frame,
-                text=f"{name}:",
-                width=16
-            )
-
-            label.grid(
-                row=i,
-                column=0,
-                padx=(5, 5),
-                pady=3,
-                sticky='w'
-            )
-
-            value_label = ttk.Label(
-                ikg_result_frame,
-                text="--",
-                width=10
-            )
-
-            value_label.grid(
-                row=i,
-                column=1,
-                padx=(0, 5),
-                pady=3,
-                sticky='w'
-            )
-
-            self.ikg_q_labels.append(
-                value_label
-            )
+        # Una misma tabla en cada método: medición, simulación y objetivo.
+        self.ikg_q_labels = self._build_ik_result_table(
+            ikg_result_frame, 'geom'
+        )
 
 
         # ----------------------------------------------------
@@ -2056,6 +1986,10 @@ class TeleopNode(Node):
         # RESULTADO (q1, q2, q3)
         # ----------------------------------------------------
 
+        # Dos opciones excluyentes para la semilla de IK.
+        # Ninguna selección activa motores ni crea una conexión serial.
+        self._build_ik_seed_selector(tab_ik_grad, 'grad')
+
         ikgr_result_frame = ttk.LabelFrame(
             tab_ik_grad,
             text="Resultado",
@@ -2068,43 +2002,10 @@ class TeleopNode(Node):
             pady=(0, 8)
         )
 
-        self.ikgr_q_labels = []
-
-        for i, name in enumerate(
-            ('q1 (Hip Roll)', 'q2 (Hip Pitch)', 'q3 (Knee)')
-        ):
-
-            label = ttk.Label(
-                ikgr_result_frame,
-                text=f"{name}:",
-                width=16
-            )
-
-            label.grid(
-                row=i,
-                column=0,
-                padx=(5, 5),
-                pady=3,
-                sticky='w'
-            )
-
-            value_label = ttk.Label(
-                ikgr_result_frame,
-                text="--",
-                width=10
-            )
-
-            value_label.grid(
-                row=i,
-                column=1,
-                padx=(0, 5),
-                pady=3,
-                sticky='w'
-            )
-
-            self.ikgr_q_labels.append(
-                value_label
-            )
+        # Una misma tabla en cada método: medición, simulación y objetivo.
+        self.ikgr_q_labels = self._build_ik_result_table(
+            ikgr_result_frame, 'grad'
+        )
 
 
         # ----------------------------------------------------
@@ -2187,6 +2088,163 @@ class TeleopNode(Node):
     # ========================================================
     # SLIDER
     # ========================================================
+
+    def _build_ik_result_table(self, frame, key):
+        """Construye la misma tabla en las cinco pestañas de IK.
+
+        Los objetivos solo se escriben tras el cálculo del solver;
+        RViz procede del estado simulado; Robot real del feedback.
+        """
+        frame.columnconfigure(0, weight=2)
+        for col in (1, 2, 3):
+            frame.columnconfigure(col, weight=1)
+
+        for col, title in enumerate(
+            ('Articulación', 'Robot real (encoders)',
+             'RViz (simulación)', 'Objetivo IK'),
+        ):
+            ttk.Label(frame, text=title, font=('Arial', 9, 'bold')).grid(
+                row=0, column=col, sticky='w', padx=7, pady=(3, 8)
+            )
+
+        panels = {'real': [], 'sim': [], 'target': []}
+        names = ('q1 (Hip Roll)', 'q2 (Hip Pitch)', 'q3 (Knee)')
+        for i, name in enumerate(names):
+            ttk.Label(frame, text=name + ':').grid(
+                row=i + 1, column=0, sticky='w', padx=7, pady=4
+            )
+            for col, kind in enumerate(('real', 'sim', 'target'), start=1):
+                label = ttk.Label(frame, text='Sin datos' if kind == 'real' else '--')
+                label.grid(row=i + 1, column=col, sticky='w', padx=7, pady=4)
+                panels[kind].append(label)
+        self.ik_result_panels[key] = panels
+        # Compatibilidad: apply_ik_*_result usa las etiquetas del objetivo.
+        return panels['target']
+
+    def _build_ik_seed_selector(self, parent, method):
+        """Dos botones de opción para la semilla del solver iterativo."""
+        frame = ttk.LabelFrame(
+            parent, text="Semilla inicial para el cálculo IK",
+            padding=8, style='Section.TLabelframe'
+        )
+        frame.pack(fill='x', pady=(0, 8))
+        selected = tk.StringVar(master=self.root, value='rviz')
+        self.ik_seed_sources[method] = selected
+        ttk.Radiobutton(
+            frame, text="Simulación (posición actual de RViz)",
+            variable=selected, value='rviz'
+        ).pack(side='left', padx=(4, 16))
+        ttk.Radiobutton(
+            frame, text="Hardware (lecturas de encoders)",
+            variable=selected, value='hardware'
+        ).pack(side='left', padx=4)
+        ttk.Label(
+            parent,
+            text="Hardware requiere 3 lecturas calibradas, válidas y recientes (máx. 2 s).",
+            foreground='#666666'
+        ).pack(anchor='w', pady=(0, 7))
+
+    def _get_ik_seed(self, method):
+        """Devuelve q inicial en GRADOS en el orden Roll, Pitch, Knee.
+
+        No reutiliza estados obsoletos ni sustituye hardware por RViz
+        silenciosamente. Los callbacks ROS actualizan los estados existentes.
+        """
+        source = self.ik_seed_sources[method].get()
+        if source == 'rviz':
+            if not self.has_sim_state:
+                raise ValueError(
+                    "No hay estado articular de RViz. Espere /robot/joint_states "
+                    "o ajuste la configuración simulada antes de calcular."
+                )
+            seed = list(self.current_deg[:3])
+        elif source == 'hardware':
+            now = time.monotonic()
+            names = ('Hip Roll', 'Hip Pitch', 'Knee')
+            missing = [
+                names[i] for i in range(3)
+                if (not self.real_valid[i]
+                    or self.real_updated_at[i] is None
+                    or (now - self.real_updated_at[i]) > self.real_timeout_sec)
+            ]
+            if missing:
+                raise ValueError(
+                    "No es posible usar semilla de hardware: sin lectura "
+                    "válida y reciente de " + ', '.join(missing) + ". "
+                    "Conecte y alinee los encoders o seleccione RViz."
+                )
+            seed = list(self.real_deg[:3])
+        else:
+            raise ValueError("Fuente de semilla desconocida.")
+        if len(seed) != 3 or not all(math.isfinite(v) for v in seed):
+            raise ValueError("La semilla contiene valores articulares inválidos.")
+        return seed, source
+
+    def _real_joint_visual_status(self, i, now=None):
+        """Separar disponibilidad de medida y coincidencia con RViz.
+
+        Un valor cercano a RViz no prueba que el sensor siga conectado;
+        una lectura reciente distinta de RViz no es una lectura antigua.
+        """
+        if now is None:
+            now = time.monotonic()
+        stamp = self.real_updated_at[i]
+        if not self.real_valid[i] or stamp is None:
+            return 'sin_datos'
+        if now - stamp > self.real_timeout_sec:
+            return 'sin_actualizacion'
+        if not self.has_sim_state:
+            return 'sin_simulacion'
+        if abs(self.real_deg[i] - self.current_deg[i]) > self.real_sim_tolerance_deg:
+            return 'desfasado'
+        return 'coincide'
+
+    def _refresh_ik_measurement_tables(self):
+        """Actualizar UI desde Tkinter, nunca desde callbacks ROS."""
+        now = time.monotonic()
+        for panels in self.ik_result_panels.values():
+            for i in range(min(3, self.num_joints)):
+                real = panels['real'][i]
+                state = self._real_joint_visual_status(i, now)
+                if state == 'sin_datos':
+                    real.config(text='Sin datos', foreground='gray')
+                else:
+                    value = f'{self.real_deg[i]:.2f}°'
+                    if state == 'sin_actualizacion':
+                        real.config(text=value + ' (sin actualización)', foreground='gray')
+                    elif state == 'sin_simulacion':
+                        real.config(text=value + ' (sin RViz)', foreground='#a56c09')
+                    elif state == 'desfasado':
+                        real.config(text=value + ' (difiere >2°)', foreground='#b22222')
+                    else:
+                        real.config(text=value, foreground='#14683a')
+
+                sim = panels['sim'][i]
+                if self.has_sim_state:
+                    sim.config(text=f'{self.current_deg[i]:.2f}°')
+                else:
+                    sim.config(text='--')
+
+    def _update_real_joint(self, index, value):
+        if 0 <= index < self.num_joints and math.isfinite(value):
+            self.real_deg[index] = float(value)
+            self.real_valid[index] = True
+            self.real_updated_at[index] = time.monotonic()
+            self.has_real_state = any(self.real_valid)
+
+    def on_bldc_state(self, msg):
+        # serial_bridge_bldc informa el ángulo físico del firmware:
+        # BLDC -90° corresponde a 0° en el sistema cinemático ROS.
+        if len(msg.data) >= 1:
+            self._update_real_joint(0, float(msg.data[0]) + 90.0)
+
+    def on_servos_state(self, msg):
+        # serial_bridge_servos entrega medidas AS5600 calibradas,
+        # relativas al centro articular. No agregar offsets otra vez.
+        if len(msg.data) >= 2:
+            self._update_real_joint(1, float(msg.data[0]))
+            self._update_real_joint(2, float(msg.data[1]))
+
 
     def on_slider_change(
         self,
@@ -2391,7 +2449,7 @@ class TeleopNode(Node):
     # APLICAR A HARDWARE (ESP32 real, vía control_node)
     # ========================================================
 
-    def apply_to_hardware(self, set_status=None, on_rejected=None):
+    def apply_to_hardware(self, set_status=None, on_rejected=None, goal_deg=None):
 
         # Envía al hardware real la última consigna calculada,
         # sea por los sliders (Cinemática directa) o por el
@@ -2411,6 +2469,14 @@ class TeleopNode(Node):
         if set_status is None:
             set_status = self.set_status
 
+        angles = (list(self.target_deg) if goal_deg is None
+                  else list(goal_deg))
+        if len(angles) != self.num_joints or not all(
+            math.isfinite(v) for v in angles
+        ):
+            set_status('✗ Consigna articular inválida.', 'red')
+            return False
+
 
         # ----------------------------------------------------
         # 1. LÍMITE DE LA INTERFAZ (lower_deg / upper_deg)
@@ -2424,12 +2490,12 @@ class TeleopNode(Node):
         tol = 1e-6
 
         fuera = [
-            f"{self.joint_names[i]}={self.target_deg[i]:.1f}° "
+            f"{self.joint_names[i]}={angles[i]:.1f}° "
             f"({self.lower_deg[i]:.0f}° a {self.upper_deg[i]:.0f}°)"
             for i in range(self.num_joints)
             if not (
                 self.lower_deg[i] - tol
-                <= self.target_deg[i]
+                <= angles[i]
                 <= self.upper_deg[i] + tol
             )
         ]
@@ -2455,7 +2521,7 @@ class TeleopNode(Node):
         hw_msg = JointTarget()
 
         hw_msg.position = [
-            math.radians(self.target_deg[i])
+            math.radians(angles[i])
             for i in range(self.num_joints)
         ]
 
@@ -2479,6 +2545,49 @@ class TeleopNode(Node):
     # RESPUESTA DE control_node AL COMANDO DE HARDWARE
     # (hilo de ROS; solo guarda el dato, ver refresh())
     # ========================================================
+
+    def on_bldc_reference_status(self, msg):
+        # El callback ROS no modifica widgets Tkinter directamente.
+        self.bldc_reference_message = msg.data
+
+    def _refresh_bldc_reference_status(self):
+        message = self.bldc_reference_message
+        if message is None:
+            return
+        self.bldc_reference_message = None
+        parts = dict(part.split('=', 1) for part in message.split(';') if '=' in part)
+        connected = parts.get('connected') == 'yes'
+        validated = parts.get('validated', 'unknown')
+        stored = parts.get('stored', 'unknown')
+        if not connected:
+            state = 'Estado: puente sin conexión física'
+        elif validated == 'yes':
+            state = 'Estado reportado: referencia VALIDADA'
+        elif validated == 'no':
+            state = 'Estado reportado: referencia NO validada'
+        else:
+            state = 'Estado: conectado, validación no informada'
+        self.bldc_ref_state_label.configure(text=state)
+        saved_map = {'yes': 'SÍ', 'no': 'NO', 'unknown': 'desconocida'}
+        self.bldc_ref_saved_label.configure(
+            text='Referencia almacenada: ' + saved_map.get(stored, 'desconocida')
+        )
+        can = parts.get('can', 'unknown')
+        can_label = {'yes': 'telemetría válida', 'no': 'sin telemetría válida',
+                     'unknown': 'sin información'}.get(can, 'sin información')
+        self.bldc_ref_can_label.configure(text='CAN: ' + can_label)
+        zero = parts.get('zero', 'unknown')
+        pos = parts.get('position', 'unknown')
+        try:
+            z = float(zero)
+            p = float(pos)
+            if math.isfinite(z) and math.isfinite(p) and can == 'yes':
+                txt = f'Posición CAN: {p:.6f} rev  |  referencia: {z:.6f} rev'
+            else:
+                txt = 'Posición CAN: sin dato válido'
+        except (TypeError, ValueError):
+            txt = 'Posición CAN: sin dato válido'
+        self.bldc_ref_angle_label.configure(text=txt)
 
     def on_hardware_status(self, msg):
 
@@ -2521,6 +2630,29 @@ class TeleopNode(Node):
     # CINEMÁTICA INVERSA - ENVIAR OBJETIVO
     # ========================================================
 
+    def _crear_selector_codo(self, parent, metodo):
+        """Selector independiente para cada uno de los tres métodos analíticos."""
+        if not hasattr(self, 'ik_codo_vars'):
+            self.ik_codo_vars = {}
+        var = tk.StringVar(master=self.root, value='arriba')
+        self.ik_codo_vars[metodo] = var
+        frame = ttk.LabelFrame(parent, text='Configuración de rodilla', padding=8)
+        frame.pack(fill='x', pady=(0, 8))
+        ttk.Radiobutton(
+            frame, text='Codo arriba', variable=var, value='arriba'
+        ).pack(side='left', padx=(5, 20))
+        ttk.Radiobutton(
+            frame, text='Codo abajo', variable=var, value='abajo'
+        ).pack(side='left')
+
+    def _publicar_ik_con_rama(self, publicador, x, y, z, metodo):
+        """Float64MultiArray: [x_mm, y_mm, z_mm, signo_de_rama]."""
+        seleccion = self.ik_codo_vars[metodo].get()
+        signo = 1.0 if seleccion == 'arriba' else -1.0
+        msg = Float64MultiArray()
+        msg.data = [float(x), float(y), float(z), signo]
+        publicador.publish(msg)
+
     def send_ik_target(self):
 
         try:
@@ -2539,12 +2671,7 @@ class TeleopNode(Node):
 
         self.last_ik_target = (x, y, z)
 
-        point = Point()
-        point.x = x
-        point.y = y
-        point.z = z
-
-        self.ik_target_pub.publish(point)
+        self._publicar_ik_con_rama(self.ik_target_pub_branch, x, y, z, 'alg')
 
         self.set_ik_status(
             "Calculando...",
@@ -2670,19 +2797,7 @@ class TeleopNode(Node):
 
         coord_var = tk.BooleanVar(value=True)
 
-        ttk.Checkbutton(
-            motion_frame,
-            text="Coordinado (mismo tiempo en las 3 articulaciones)",
-            variable=coord_var
-        ).grid(
-            row=6,
-            column=0,
-            columnspan=4,
-            sticky='w',
-            padx=(5, 3),
-            pady=(3, 0)
-        )
-
+        # Coordinacion isocrona siempre activa (sin control visible).
         self.ik_motion[key] = {
             'metodo_var': metodo_var,
             'campos': campos,
@@ -2746,7 +2861,7 @@ class TeleopNode(Node):
         if T is None:
             raise pt.ErrorPerfil('falta el tiempo T del movimiento')
 
-        return metodo, T, {}, motion['coord_var'].get()
+        return metodo, T, {}, True
 
 
     # ========================================================
@@ -2879,7 +2994,8 @@ class TeleopNode(Node):
         if motion.get('con_hardware'):
             self.apply_to_hardware(lambda *_: None)
 
-        self.show_ik_q_labels(motion['q_labels'], q)
+        # El objetivo IK es fijo durante la animación; los valores de
+        # RViz los proporciona /robot/joint_states (no el objetivo).
 
         fin = idx >= len(Q) - 1
 
@@ -2933,56 +3049,25 @@ class TeleopNode(Node):
     # ========================================================
 
     def _aplicar_movimiento_hardware(self, key, set_status):
+        """Envia el objetivo IK sin modificar la postura de RViz.
 
+        La columna Robot real solo varía si llega telemetría auténtica.
+        El firmware decide cómo ejecutar el objetivo físico; esto NO
+        garantiza sincronización temporal entre las dos ESP32.
+        """
         motion = self.ik_motion.get(key)
-
         if motion is None or motion.get('Q') is None:
-
-            set_status(
-                "✗ Primero calculá un movimiento (Home o un resultado "
-                "de cinemática inversa).",
-                "red"
-            )
-
+            set_status('✗ Primero calcula una solución IK válida.', 'red')
             return
 
-        q_destino = [float(v) for v in motion['Q'][-1]]
-
-        self.stop_all_motion()
-
-        try:
-            metodo, T, params, coordinado = self._leer_parametros_movimiento(key)
-
-            perfiles = pt.planificar_ptp(
-                list(self.target_deg), q_destino, metodo, T, params,
-                coordinado
-            )
-
-            _, Q, _, _ = pt.muestrear(perfiles, DT_MOVIMIENTO)
-
-        except (pt.ErrorPerfil, ValueError, KeyError) as error:
-
-            set_status(
-                f"✗ {error or 'revisa los parámetros de la trayectoria'}",
-                "red"
-            )
-
+        goal = [float(v) for v in motion['Q'][-1]]
+        if not all(math.isfinite(v) for v in goal):
+            set_status('✗ Objetivo IK inválido.', 'red')
             return
 
-        motion.update({
-            'Q': Q,
-            'idx': 0,
-            'after_id': None,
-            'set_status': set_status,
-            'con_hardware': True,
-        })
-
-        set_status(
-            "Moviendo (RViz y motores)...",
-            "blue"
-        )
-
-        self._tick_ik_motion(key)
+        # No cambiar self.target_deg: el preview puede estar animándose.
+        # El botón de hardware NO reinicia el movimiento simulado.
+        self.apply_to_hardware(set_status, goal_deg=goal)
 
 
     # ========================================================
@@ -3229,22 +3314,26 @@ class TeleopNode(Node):
 
         self.last_ik_newton_target = (x, y, z)
 
-        # La semilla no se pide al usuario: se toma la pose
-        # articular actual (self.target_deg), que es la misma
-        # que se ve en la pestaña de cinemática directa.
+        # La semilla la determina el selector de RViz / Hardware.
+        # La función de validación impide usar datos físicos antiguos.
 
         target = IKJacobTarget()
         target.x = x
         target.y = y
         target.z = z
-        target.q1_seed = self.target_deg[0]
-        target.q2_seed = self.target_deg[1]
-        target.q3_seed = self.target_deg[2]
+        try:
+            seed, source = self._get_ik_seed('newton')
+        except ValueError as exc:
+            self.set_ik_newton_status(str(exc), "red")
+            return
+        target.q1_seed, target.q2_seed, target.q3_seed = seed
 
         self.ik_newton_target_pub.publish(target)
 
         self.set_ik_newton_status(
-            "Calculando...",
+            "Calculando... semilla {}: [{:.2f}, {:.2f}, {:.2f}]°".format(
+                'RViz' if source == 'rviz' else 'encoders', *seed
+            ),
             "gray"
         )
 
@@ -3349,12 +3438,7 @@ class TeleopNode(Node):
 
         self.last_ik_des_target = (x, y, z)
 
-        point = Point()
-        point.x = x
-        point.y = y
-        point.z = z
-
-        self.ik_des_target_pub.publish(point)
+        self._publicar_ik_con_rama(self.ik_des_target_pub_branch, x, y, z, 'des')
 
         self.set_ik_des_status(
             "Calculando...",
@@ -3462,12 +3546,7 @@ class TeleopNode(Node):
 
         self.last_ik_geom_target = (x, y, z)
 
-        point = Point()
-        point.x = x
-        point.y = y
-        point.z = z
-
-        self.ik_geom_target_pub.publish(point)
+        self._publicar_ik_con_rama(self.ik_geom_target_pub_branch, x, y, z, 'geom')
 
         self.set_ik_geom_status(
             "Calculando...",
@@ -3575,22 +3654,26 @@ class TeleopNode(Node):
 
         self.last_ik_grad_target = (x, y, z)
 
-        # La semilla no se pide al usuario: se toma la pose
-        # articular actual (self.target_deg), que es la misma
-        # que se ve en la pestaña de cinemática directa.
+        # La semilla la determina el selector de RViz / Hardware.
+        # La función de validación impide usar datos físicos antiguos.
 
         target = IKJacobTarget()
         target.x = x
         target.y = y
         target.z = z
-        target.q1_seed = self.target_deg[0]
-        target.q2_seed = self.target_deg[1]
-        target.q3_seed = self.target_deg[2]
+        try:
+            seed, source = self._get_ik_seed('grad')
+        except ValueError as exc:
+            self.set_ik_grad_status(str(exc), "red")
+            return
+        target.q1_seed, target.q2_seed, target.q3_seed = seed
 
         self.ik_grad_target_pub.publish(target)
 
         self.set_ik_grad_status(
-            "Calculando...",
+            "Calculando... semilla {}: [{:.2f}, {:.2f}, {:.2f}]°".format(
+                'RViz' if source == 'rviz' else 'encoders', *seed
+            ),
             "gray"
         )
 
@@ -3999,6 +4082,7 @@ class TeleopNode(Node):
                         positions[i]
                     )
                 )
+            self.has_sim_state = len(positions) >= self.num_joints
 
         except Exception as e:
 
@@ -4031,9 +4115,7 @@ class TeleopNode(Node):
                 # servo: llega en el mismo sistema de grados
                 # que usan los sliders (espacio cinemático).
 
-                self.real_deg[i] = float(data[i])
-
-            self.has_real_state = True
+                self._update_real_joint(i, float(data[i]))
 
         except Exception as e:
 
@@ -4071,6 +4153,8 @@ class TeleopNode(Node):
 
 
     def _refresh_once(self):
+
+        self._refresh_bldc_reference_status()
 
         # ----------------------------------------------------
         # Si llegó un resultado nuevo de cinemática inversa,
@@ -4130,28 +4214,24 @@ class TeleopNode(Node):
         # no tocar widgets desde otro hilo.
         # ----------------------------------------------------
 
+        self._refresh_ik_measurement_tables()
+
+        now = time.monotonic()
         for i in range(self.num_joints):
-
-            if self.has_real_state:
-
-                diff = abs(
-                    self.real_deg[i]
-                    - self.target_deg[i]
-                )
-
-                color = 'dark green' if diff < 2.0 else 'firebrick'
-
-                self.real_labels[i].config(
-                    text=f"real: {self.real_deg[i]:.1f}°",
-                    foreground=color
-                )
-
+            state = self._real_joint_visual_status(i, now)
+            if state == 'sin_datos':
+                txt, color = 'real: sin datos', 'gray'
             else:
-
-                self.real_labels[i].config(
-                    text="real: sin datos",
-                    foreground='gray'
-                )
+                value = f'real: {self.real_deg[i]:.1f}°'
+                if state == 'sin_actualizacion':
+                    txt, color = value + ' (sin actualización)', 'gray'
+                elif state == 'sin_simulacion':
+                    txt, color = value + ' (sin RViz)', '#a56c09'
+                elif state == 'desfasado':
+                    txt, color = value + ' (difiere >2°)', 'firebrick'
+                else:
+                    txt, color = value, 'dark green'
+            self.real_labels[i].config(text=txt, foreground=color)
 
 
 

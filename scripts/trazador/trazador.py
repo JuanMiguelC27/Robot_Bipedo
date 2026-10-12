@@ -1,35 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-Trazador: dibujo a mano alzada -> trayectoria de vectores (.txt)
+"""Trazador YZ para cinemática inversa de la pierna.
 
-Dibuja con el ratón / lápiz sobre un plano de trabajo (255 x 255 mm por defecto: el área segura de la pierna).
-El programa identifica la figura (triángulo, cuadrado, polígono, círculo, línea
-o trazo libre), interpola los puntos con un paso fijo y exporta la lista de
-vectores [x,y,z] en mm, lista para la cinemática inversa de la pierna.
-Las figuras se dibujan a Z constante (200 mm por defecto); entre figuras
-distintas el lápiz se levanta (Z + 100 mm), se desplaza y vuelve a bajar.
-
-Uso:        python3 trazador.py
-Requisitos: Python 3 + Tkinter   (sudo apt install python3-tk)
-
-Sistema de coordenadas: origen (0,0) en la esquina INFERIOR IZQUIERDA del
-plano, X hacia la derecha, Y hacia arriba, unidades en mm.
-Z es configurable en la interfaz (plano de dibujo y elevación del lápiz).
-
-"Exportar para la pierna" guarda la trayectoria ya convertida al sistema de
-coordenadas de la pierna del robot (el de las pestañas de cinemática
-inversa de robot_teleop: X a lo largo de la pierna hacia abajo, Y adelante,
-Z lateral; el papel es un plano X = constante), en formato "x, y, z", listo
-para la pestaña Trayectorias o "Abrir archivo..." de la interfaz. Usa
-robot_kinematics/kinem_v6.py para marcar en rojo los puntos que la pierna no
-alcanza dentro de los límites del control.
+Lienzo: Z horizontal, Y vertical, ambos con limites absolutos configurables.
+Al dibujar X es constante. El lapiz se levanta reduciendo X entre figuras.
+Guardar y Exportar producen puntos XYZ en milimetros, compatibles con ROS.
+La simulación temporal utiliza, cuando esta instalado, perfiles_temporales
+(lineal, cubico, quintico) de robot_kinematics; no necesita hardware.
 """
 import math
 import os
 import re
 import sys
 import time
+import threading
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
@@ -243,12 +227,12 @@ def interpolate(verts, step=1.0, dec=0):
     return out
 
 
-def build_path(figs, W, H, step=1.0, dec=0, normalize=False, z_draw=200.0, lift=100.0):
-    """Construye la trayectoria 3D (x,y,z) de todas las figuras.
-    Cada figura se dibuja en el plano z = z_draw (cerrando las figuras
-    cerradas). Entre una figura y la siguiente se levanta el lápiz:
-    sube 'lift' mm en Z, se desplaza en XY hasta el inicio de la siguiente
-    figura y vuelve a bajar. Todo el recorrido se interpola con el mismo paso."""
+def build_path(figs, W, H, step=1.0, dec=0, z_draw=0.0, lift=1.0):
+    """Construye una trayectoria local (u,v,w) sobre el plano YZ.
+
+    u,v son desplazamientos desde Z_min e Y_min; w=0 es lápiz apoyado,
+    w=1 es lápiz levantado. Se interpolan los segmentos en u,v.
+    """
     polys = []
     for f in figs:
         vs = list(f["verts"])
@@ -257,10 +241,6 @@ def build_path(figs, W, H, step=1.0, dec=0, normalize=False, z_draw=200.0, lift=
         polys.append([(min(max(x, 0.0), W), min(max(y, 0.0), H)) for x, y in vs])
     if not polys:
         return []
-    if normalize:
-        mx = min(x for vs in polys for x, _ in vs)
-        my = min(y for vs in polys for _, y in vs)
-        polys = [[(x - mx, y - my) for x, y in vs] for vs in polys]
     zd = rnd(z_draw, dec)
     zu = rnd(z_draw + lift, dec)
 
@@ -276,12 +256,11 @@ def build_path(figs, W, H, step=1.0, dec=0, normalize=False, z_draw=200.0, lift=
 
 
 def count_lifts(path):
-    """Número de veces que se levanta el lápiz (la Z del dibujo es la del
-    primer punto)."""
+    """Número de transiciones de lápiz apoyado a levantado."""
     if not path:
         return 0
     zd = path[0][2]
-    return sum(1 for a, b in zip(path, path[1:]) if a[2] == zd and b[2] != zd)
+    return sum(1 for a, b in zip(path, path[1:]) if abs(a[2] - zd) < 1e-6 and abs(b[2] - zd) >= 1e-6)
 
 
 def format_path(path, fmt="lineas", dec=0):
@@ -307,46 +286,21 @@ def parse_path(text, z_default=200.0):
 
 
 # =============================================================================
-#  Marco de la pierna (sistema de las pestañas de cinemática inversa)
+#  Coordenadas del robot: X normal al plano, Y vertical, Z horizontal
 # =============================================================================
-#
-# X a lo largo de la pierna hacia ABAJO, Y hacia adelante, Z lateral (la
-# pierna izquierda está en -Z, la derecha en +Z; +Z es el lado derecho del
-# robot). El robot escribe sobre un papel HORIZONTAL: un plano X = cte.
-#
-# Papel:   u hacia la derecha, v hacia arriba, w = altura del lápiz en el
-#          trazador. Se ve como lo vería alguien de pie DETRÁS del robot,
-#          mirando hacia adelante y hacia abajo: arriba del dibujo =
-#          adelante del robot, derecha del dibujo = derecha del robot.
-#
-#     X = x_papel - levantar * (w - w_dibujo) / (w_max - w_dibujo)
-#     Y = yc + (v - alto/2) * escala
-#     Z = zc + (u - ancho/2) * escala      (con espejo: -(u - ancho/2))
-#
-# Valores por defecto: los de kinem_v6.PAPEL_RECOMENDADO (papel 165 mm por
-# encima del pie colgando, área segura de 255 x 255 mm, lápiz levantado
-# 20 mm; límites del control con roll >= 0°).
 
-PAPEL_RECOMENDADO = {
-    "left": dict(x_paper=685.28, yc=0.0, zc=-489.48, lado=255.0),
-    "right": dict(x_paper=685.28, yc=0.0, zc=489.48, lado=255.0),
-}
+# El lienzo usa coordenadas locales (u,v,w): u crece hacia +Z, v hacia +Y,
+# w=0 para dibujar y w=1 para levantar el lapiz. Los TXT usan (X,Y,Z).
 LADOS = {"Izquierda": "left", "Derecha": "right"}
 
 
-def paper_to_leg(path, x_paper=685.28, yc=0.0, zc=-489.48, width=255.0, height=255.0,
-                 scale=1.0, mirror=False, lift=20.0):
-    """Convierte una trayectoria (u, v, w) del papel al sistema de la pierna.
-    La altura del dibujo (lápiz abajo) es la del primer punto; los puntos
-    con w mayor se levantan proporcionalmente hasta 'lift' mm (X menor)."""
-    if not path:
-        return []
-    w_draw = path[0][2]
-    w_span = max(p[2] for p in path) - w_draw
-    sign = -1 if mirror else 1
-    return [(x_paper - (lift * (w - w_draw) / w_span if w_span > 0 else 0.0),
-             yc + (v - height / 2) * scale,
-             zc + sign * (u - width / 2) * scale)
+def yz_to_xyz(path, z_min, y_min, x_draw, x_lift):
+    """Convierte posiciones locales del lienzo a coordenadas XYZ absolutas.
+
+    El lapiz se eleva disminuyendo X (segun convencion del robot).
+    """
+    return [(float(x_draw) - float(x_lift) * float(w),
+             float(y_min) + float(v), float(z_min) + float(u))
             for u, v, w in path]
 
 
@@ -397,13 +351,83 @@ def unreachable_points(leg, ik, side="left"):
 
 
 # =============================================================================
+#  Workspace YZ: soluciones analíticas vectorizadas, mismo modelo y límites
+#  que kinem_v6 (sin dependencias de ROS 2 ni de actuadores).
+# =============================================================================
+
+def workspace_analitico(ik, x_fijo, side, y_axis, z_axis, lift=20.0,
+                         margen_deg=5.0, flexion_min_deg=10.0):
+    """Devuelve máscara segura, máscara alcanzable y margen para cada Y,Z.
+
+    Se evalúan ambas raíces de la cadera y ambas ramas de rodilla mediante
+    expresiones algebraicas; se comprueba además la pose con el lápiz elevado.
+    Los márgenes se aplican en las dos alturas, evitando aceptar un punto de
+    dibujo que no admita retirar el lápiz verticalmente.
+    """
+    import numpy as np
+    Y, Z = np.meshgrid(np.asarray(y_axis, float), np.asarray(z_axis, float), indexing="ij")
+    limits = np.asarray(ik.LIMITES_CONTROL_DEG, dtype=float)
+
+    def level(x):
+        pos = ik._equipo_a_modelo(np.stack([np.full_like(Y, x), Y, Z], axis=-1), side)
+        xp, yp, zp = ik._a_izquierda((pos[..., 0], pos[..., 1], pos[..., 2]), side)
+        L1, L2, L3, L4, L5, L6 = (ik.L1, ik.L2, ik.L3, ik.L4, ik.L5, ik.L6)
+        rho = (xp-L2)**2+(zp+L1)**2
+        disc = rho-L3**2
+        reachable = np.zeros(Y.shape, dtype=bool)
+        safe = np.zeros(Y.shape, dtype=bool)
+        best_margin = np.full(Y.shape, -np.inf)
+        # Las cuatro soluciones analíticas algebraicas del modelo del proyecto.
+        # Emplear las ecuaciones validadas de kinem_v6 evita discrepancias
+        # de signos y de referencias entre las dos piernas.
+        with np.errstate(invalid='ignore', divide='ignore'):
+            for q1,q2,q3,available in ik._soluciones_geometrico_izq(xp,yp,zp):
+                q=ik._q_desde_izquierda((q1,q2,q3),side)
+                t=ik.modelo_a_interfaz(q,side)
+                margin=np.minimum.reduce([t[j]-limits[j,0] for j in range(3)]+[limits[j,1]-t[j] for j in range(3)])
+                valid=available & np.isfinite(margin) & (margin>=-1e-7)
+                reachable |= valid
+                flexion=np.abs(t[2])
+                good=valid & (margin>=margen_deg) & (flexion>=flexion_min_deg)
+                safe |= good
+                best_margin=np.maximum(best_margin, np.where(valid, margin, -np.inf))
+        return reachable, safe, best_margin
+
+    reachable, safe, margin = level(x_fijo)
+    if lift > 0:
+        _, raised, _ = level(x_fijo-lift)
+        safe &= raised
+    return reachable, safe, margin
+
+
+def largest_square(mask, preferred=None):
+    """Mayor cuadrado alineado a ejes en una máscara equiespaciada [Y,Z]."""
+    import numpy as np
+    rows, cols = mask.shape
+    dp = np.zeros((rows+1, cols+1), dtype=np.int32)
+    best = (0, 0, 0)
+    best_dist = float("inf")
+    for i in range(1, rows+1):
+        for j in range(1, cols+1):
+            if mask[i-1,j-1]:
+                n=1+min(dp[i-1,j],dp[i,j-1],dp[i-1,j-1])
+                dp[i,j]=n
+                center = (i-(n+1)/2, j-(n+1)/2)
+                d = ((center[0]-preferred[0])**2 + (center[1]-preferred[1])**2) if preferred else 0
+                if n > best[0] or (n == best[0] and d < best_dist):
+                    best=(int(n), i-n, j-n)
+                    best_dist=d
+    return best
+
+
+# =============================================================================
 #  Interfaz gráfica
 # =============================================================================
 
 FORMATOS = {
-    "[x,y,z] uno por línea": "lineas",
-    "[x,y,z], [x,y,z], ... en una línea": "una_linea",
-    "x,y,z (CSV)": "csv",
+    "[X,Y,Z] uno por línea": "lineas",
+    "[X,Y,Z], [X,Y,Z], ... en una línea": "una_linea",
+    "X,Y,Z (CSV)": "csv",
 }
 
 
@@ -421,26 +445,20 @@ class Trazador(tk.Tk):
         self.bad = set()       # índices de puntos fuera de alcance
         self.ik = load_leg_ik()
 
-        self.var_w = tk.DoubleVar(value=PAPEL_RECOMENDADO["left"]["lado"])
-        self.var_h = tk.DoubleVar(value=PAPEL_RECOMENDADO["left"]["lado"])
+        self.var_ymin = tk.DoubleVar(value=-127.5)
+        self.var_ymax = tk.DoubleVar(value=127.5)
+        self.var_zmin = tk.DoubleVar(value=-616.98)
+        self.var_zmax = tk.DoubleVar(value=-361.98)
         self.var_mode = tk.StringVar(value="Detectar figura")
         self.var_sens = tk.DoubleVar(value=6)
         self.var_step = tk.DoubleVar(value=1)
-        self.var_dec = tk.IntVar(value=0)
+        self.var_dec = tk.IntVar(value=2)
         self.var_close = tk.BooleanVar(value=True)
-        self.var_norm = tk.BooleanVar(value=False)
         self.var_fmt = tk.StringVar(value=list(FORMATOS)[0])
         self.var_show_pts = tk.BooleanVar(value=True)
-        self.var_z = tk.DoubleVar(value=200)
-        self.var_lift = tk.DoubleVar(value=100)
-        self.var_side = tk.StringVar(value="Izquierda")
-        rec = PAPEL_RECOMENDADO["left"]
-        self.var_xp = tk.DoubleVar(value=rec["x_paper"])
-        self.var_yc = tk.DoubleVar(value=rec["yc"])
-        self.var_zc = tk.DoubleVar(value=rec["zc"])
+        self.var_xp = tk.DoubleVar(value=685.28)
         self.var_leg_lift = tk.DoubleVar(value=20)
-        self.var_scale = tk.DoubleVar(value=1)
-        self.var_mirror = tk.BooleanVar(value=False)
+        self.var_side = tk.StringVar(value="Izquierda")
         self.var_check = tk.BooleanVar(value=self.ik is not None)
         self.reach = tk.StringVar(value="")
         self.perf = load_perfiles()
@@ -451,17 +469,28 @@ class Trazador(tk.Tk):
         self.status = tk.StringVar(value="Dibuja con el botón izquierdo del ratón.")
         self.info = tk.StringVar(value="Sin trayectoria")
 
+        self.ws_x = tk.DoubleVar(value=self.var_xp.get())
+        self.ws_side = tk.StringVar(value=self.var_side.get())
+        self.ws_resolution = 5.0  # mm / celda; compromiso rapidez vs precisión
+        self.ws_summary = tk.StringVar(value="Selecciona X y pulsa Analizar workspace.")
+        self.ws_result = None
+        self.ws_running = False
         self._build_ui()
         self._set_area()
         for v in (self.var_mode, self.var_sens, self.var_step, self.var_dec,
-                  self.var_close, self.var_norm, self.var_show_pts, self.var_fmt,
-                  self.var_z, self.var_lift, self.var_xp, self.var_yc, self.var_zc,
-                  self.var_scale, self.var_mirror, self.var_check, self.var_leg_lift):
+                  self.var_close, self.var_show_pts, self.var_fmt,
+                  self.var_xp, self.var_check, self.var_leg_lift):
             v.trace_add("write", lambda *_: self._schedule_process())
 
     # ---------------------------------------------------------------- UI ----
     def _build_ui(self):
-        main = ttk.Frame(self, padding=6)
+        self.tabs = ttk.Notebook(self)
+        self.tabs.pack(fill="both", expand=True)
+        self.tab_dibujo = ttk.Frame(self.tabs)
+        self.tab_workspace = ttk.Frame(self.tabs)
+        self.tabs.add(self.tab_dibujo, text="Dibujo de trayectoria")
+        self.tabs.add(self.tab_workspace, text="Workspace del dibujo")
+        main = ttk.Frame(self.tab_dibujo, padding=6)
         main.pack(fill="both", expand=True)
 
         self.canvas = tk.Canvas(main, bg="#f4f4f4", highlightthickness=0, cursor="pencil")
@@ -474,15 +503,20 @@ class Trazador(tk.Tk):
         side = ttk.Frame(main, padding=(10, 0))
         side.grid(row=0, column=1, sticky="ns")
 
-        g = ttk.LabelFrame(side, text="Plano de trabajo (mm)", padding=6)
+        g = ttk.LabelFrame(side, text="Plano YZ — límites absolutos (mm)", padding=6)
         g.pack(fill="x", pady=3)
-        ttk.Label(g, text="Ancho").grid(row=0, column=0, sticky="w")
-        ttk.Spinbox(g, from_=10, to=1000, increment=10, textvariable=self.var_w,
-                    width=7).grid(row=0, column=1)
-        ttk.Label(g, text="Alto").grid(row=1, column=0, sticky="w")
-        ttk.Spinbox(g, from_=10, to=1000, increment=10, textvariable=self.var_h,
-                    width=7).grid(row=1, column=1)
-        ttk.Button(g, text="Aplicar", command=self._set_area).grid(row=0, column=2, rowspan=2, padx=6)
+        for row, (label, variable) in enumerate((
+            ("Y mínimo (vertical)", self.var_ymin),
+            ("Y máximo (vertical)", self.var_ymax),
+            ("Z mínimo (horizontal)", self.var_zmin),
+            ("Z máximo (horizontal)", self.var_zmax),
+        )):
+            ttk.Label(g, text=label).grid(row=row, column=0, sticky="w")
+            ttk.Entry(g, textvariable=variable, width=13).grid(row=row, column=1, sticky="w")
+        ttk.Button(g, text="Aplicar rangos", command=self._set_area).grid(
+            row=4, column=0, columnspan=2, sticky="ew", pady=(5, 0))
+        ttk.Label(g, text="Eje horizontal: Z   |   Eje vertical: Y", foreground="#555").grid(
+            row=5, column=0, columnspan=2, sticky="w")
 
         p = ttk.LabelFrame(side, text="Procesamiento", padding=6)
         p.pack(fill="x", pady=3)
@@ -503,56 +537,26 @@ class Trazador(tk.Tk):
                     width=7).grid(row=3, column=1, sticky="w")
         ttk.Checkbutton(p, text="Cerrar figuras automáticamente",
                         variable=self.var_close).grid(row=4, column=0, columnspan=3, sticky="w")
-        ttk.Checkbutton(p, text="Normalizar figura al origen (0,0)",
-                        variable=self.var_norm).grid(row=5, column=0, columnspan=3, sticky="w")
         ttk.Checkbutton(p, text="Mostrar puntos interpolados",
                         variable=self.var_show_pts).grid(row=6, column=0, columnspan=3, sticky="w")
 
-        z = ttk.LabelFrame(side, text="Eje Z (mm)", padding=6)
-        z.pack(fill="x", pady=3)
-        ttk.Label(z, text="Z del plano de dibujo").grid(row=0, column=0, sticky="w")
-        ttk.Spinbox(z, from_=-1000, to=1000, increment=10, textvariable=self.var_z,
-                    width=7).grid(row=0, column=1, sticky="w")
-        ttk.Label(z, text="Elevación al levantar").grid(row=1, column=0, sticky="w")
-        ttk.Spinbox(z, from_=-1000, to=1000, increment=10, textvariable=self.var_lift,
-                    width=7).grid(row=1, column=1, sticky="w")
-        ttk.Label(z, text="(negativa si en tu robot Z crece hacia abajo)",
-                  foreground="#777").grid(row=2, column=0, columnspan=2, sticky="w")
-
-        k = ttk.LabelFrame(side, text="Papel en la pierna (mm, sistema de las pestañas de IK)", padding=6)
+        k = ttk.LabelFrame(side, text="Posición en robot y alcance", padding=6)
         k.pack(fill="x", pady=3)
-        ttk.Label(k, text="Pierna").grid(row=0, column=0, sticky="w")
-        cb = ttk.Combobox(k, textvariable=self.var_side, state="readonly", width=10,
-                          values=list(LADOS))
-        cb.grid(row=0, column=1, sticky="w")
-        cb.bind("<<ComboboxSelected>>", lambda e: self._set_side_defaults())
-        ttk.Label(k, text="X del papel (hacia abajo)").grid(row=1, column=0, sticky="w")
-        ttk.Spinbox(k, from_=-1500, to=1500, increment=5, textvariable=self.var_xp,
-                    width=8).grid(row=1, column=1, sticky="w")
-        ttk.Label(k, text="Centro Y (adelante)").grid(row=2, column=0, sticky="w")
-        ttk.Spinbox(k, from_=-1500, to=1500, increment=5, textvariable=self.var_yc,
-                    width=8).grid(row=2, column=1, sticky="w")
-        ttk.Label(k, text="Centro Z (lateral)").grid(row=3, column=0, sticky="w")
-        ttk.Spinbox(k, from_=-1500, to=1500, increment=5, textvariable=self.var_zc,
-                    width=8).grid(row=3, column=1, sticky="w")
-        ttk.Label(k, text="Levantar lápiz").grid(row=4, column=0, sticky="w")
-        ttk.Spinbox(k, from_=0, to=200, increment=5, textvariable=self.var_leg_lift,
-                    width=8).grid(row=4, column=1, sticky="w")
-        ttk.Label(k, text="Escala").grid(row=5, column=0, sticky="w")
-        ttk.Spinbox(k, from_=0.05, to=10, increment=0.05, textvariable=self.var_scale,
-                    width=8).grid(row=5, column=1, sticky="w")
-        ttk.Checkbutton(k, text="Espejo (izquierda/derecha)",
-                        variable=self.var_mirror).grid(row=6, column=0, columnspan=2, sticky="w")
-        ttk.Button(k, text="Valores recomendados",
-                   command=self._set_side_defaults).grid(row=7, column=0, columnspan=2, sticky="w")
+        ttk.Label(k, text="X constante al dibujar (mm)").grid(row=0, column=0, sticky="w")
+        ttk.Entry(k, textvariable=self.var_xp, width=11).grid(row=0, column=1, sticky="w")
+        ttk.Label(k, text="Levantamiento del lápiz en X (mm)").grid(row=1, column=0, sticky="w")
+        ttk.Entry(k, textvariable=self.var_leg_lift, width=11).grid(row=1, column=1, sticky="w")
+        ttk.Label(k, text="Pierna").grid(row=2, column=0, sticky="w")
+        ttk.Combobox(k, textvariable=self.var_side, state="readonly", width=11,
+                     values=list(LADOS)).grid(row=2, column=1, sticky="w")
         chk = ttk.Checkbutton(k, text="Comprobar alcance de la pierna",
                               variable=self.var_check)
-        chk.grid(row=8, column=0, columnspan=2, sticky="w")
+        chk.grid(row=3, column=0, columnspan=2, sticky="w")
         if self.ik is None:
             chk.state(["disabled"])
-            self.reach.set("No se encontró robot_kinematics:\nsin comprobación de alcance.")
-        self.lbl_reach = ttk.Label(k, textvariable=self.reach, wraplength=260, justify="left")
-        self.lbl_reach.grid(row=9, column=0, columnspan=2, sticky="w")
+            self.reach.set("Sin robot_kinematics: comprobación no disponible.")
+        self.lbl_reach = ttk.Label(k, textvariable=self.reach, wraplength=280, justify="left")
+        self.lbl_reach.grid(row=4, column=0, columnspan=2, sticky="w")
 
         lt = ttk.LabelFrame(side, text="Ley temporal del lápiz", padding=6)
         lt.pack(fill="x", pady=3)
@@ -603,6 +607,7 @@ class Trazador(tk.Tk):
         ttk.Label(main, textvariable=self.status, relief="sunken", anchor="w").grid(
             row=1, column=0, columnspan=2, sticky="ew", pady=(6, 0))
 
+        self._build_workspace_ui()
         self.bind("<Control-z>", lambda e: self.undo())
         self.bind("<Control-s>", lambda e: self.save())
         self.bind("<Control-o>", lambda e: self.open_txt())
@@ -610,26 +615,221 @@ class Trazador(tk.Tk):
         self.bind("<Return>", lambda e: self.process())
         self.bind("<Delete>", lambda e: self.clear())
 
+    # ---------------------------------------------------- workspace YZ ----
+    def _build_workspace_ui(self):
+        parent = ttk.Frame(self.tab_workspace, padding=10)
+        parent.pack(fill="both", expand=True)
+        panel = ttk.Frame(parent)
+        panel.pack(side="left", fill="y", padx=(0, 10))
+        par = ttk.LabelFrame(panel, text="Parámetros de análisis", padding=8)
+        par.pack(fill="x", pady=4)
+        ttk.Label(par, text="X fija (mm)").grid(row=0, column=0, sticky="w")
+        ttk.Entry(par, textvariable=self.ws_x, width=13).grid(row=0, column=1, sticky="w")
+        ttk.Label(par, text="Pierna").grid(row=1, column=0, sticky="w")
+        ttk.Combobox(par, textvariable=self.ws_side, state="readonly", width=11,
+                     values=list(LADOS)).grid(row=1, column=1, sticky="w")
+        ttk.Label(par, text="IK por defecto: algebraico (4 ramas)").grid(row=2, column=0, columnspan=2, sticky="w", pady=3)
+        ttk.Label(par, text=f"Resolución: {self.ws_resolution:g} mm").grid(row=3, column=0, columnspan=2, sticky="w")
+        ttk.Label(par, text="Margen articular ≥ 5°; rodilla ≥ 10°\n"
+                              "El lápiz elevado también debe ser alcanzable.",
+                  justify="left", foreground="#555").grid(row=4, column=0, columnspan=2, sticky="w")
+        self.ws_analyze_btn = ttk.Button(par, text="Analizar workspace", command=self.analyze_workspace)
+        self.ws_analyze_btn.grid(row=5, column=0, columnspan=2, sticky="ew", pady=5)
+        stats=ttk.LabelFrame(panel, text="Resultados (mm)", padding=8)
+        stats.pack(fill="both", expand=True, pady=4)
+        ttk.Label(stats, textvariable=self.ws_summary, justify="left", wraplength=300).pack(anchor="w")
+        self.ws_apply_btn=ttk.Button(panel, text="Aplicar cuadrado a dibujo", command=self.apply_workspace)
+        self.ws_apply_btn.pack(fill="x", pady=10)
+        self.ws_apply_btn.state(["disabled"])
+        self.ws_canvas=tk.Canvas(parent, width=630, height=615, bg="white", highlightbackground="#bbb", highlightthickness=1)
+        self.ws_canvas.pack(side="left", fill="both", expand=True)
+        self.ws_canvas.create_text(315, 300, text="Workspace YZ: pulsa «Analizar workspace»", fill="#555")
+
+    def analyze_workspace(self):
+        if self.ws_running:
+            return
+        if self.ik is None:
+            messagebox.showerror("Workspace", "No se encontró robot_kinematics.kinem_v6.\n"
+                                 "Abre el trazador desde el proyecto que contiene ros2_ws.")
+            return
+        try:
+            x=float(self.ws_x.get())
+            if not math.isfinite(x):
+                raise ValueError("X debe ser finita")
+            side=LADOS[self.ws_side.get()]
+            lift=float(self.var_leg_lift.get())
+            if not 0<=lift<=200:
+                raise ValueError("Elevación del lápiz fuera de rango [0,200] mm")
+        except (ValueError,tk.TclError,KeyError) as err:
+            messagebox.showerror("Workspace",str(err))
+            return
+        self.ws_running=True
+        self.ws_analyze_btn.state(["disabled"])
+        self.ws_apply_btn.state(["disabled"])
+        self.ws_summary.set("Calculando espacio de trabajo y cuadrado seguro...")
+        # La IK opera en un hilo; Tk se actualiza solo en hilo principal.
+        def worker():
+            try:
+                import numpy as np
+                step=self.ws_resolution
+                ya=np.arange(-500., 500.+step*.5,step)
+                za=np.arange(-1000., 1000.+step*.5,step)
+                attainable,safe,margin=workspace_analitico(self.ik,x,side,ya,za,lift)
+                paper=self.ik.PAPEL_RECOMENDADO[side]['centro']
+                prefer=((paper[0]-ya[0])/step,(paper[1]-za[0])/step)
+                size,i,j=largest_square(safe, preferred=prefer)
+                if size:
+                    # Conservar un punto de margen interior por lado: seguro en la
+                    # cuadrícula, pero los bordes continuos son una aproximación.
+                    margin_cells=1 if size>3 else 0
+                    y0,y1=ya[i+margin_cells],ya[i+size-1-margin_cells]
+                    z0,z1=za[j+margin_cells],za[j+size-1-margin_cells]
+                    square=(float(y0),float(y1),float(z0),float(z1))
+                else:
+                    square=None
+                result=dict(x=x,side=side,step=step,ya=ya,za=za,
+                            attainable=attainable,safe=safe,margin=margin,square=square,
+                            lift=lift)
+                self.after(0,lambda result=result:self._finish_workspace(result,None))
+            except Exception as exc:
+                self.after(0,lambda msg=str(exc):self._finish_workspace(None,msg))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _finish_workspace(self,result,error):
+        self.ws_running=False
+        self.ws_analyze_btn.state(["!disabled"])
+        if error:
+            self.ws_summary.set("No se pudo calcular el workspace: " + error)
+            return
+        self.ws_result=result
+        ya,za=result['ya'],result['za']
+        reach=result['attainable']; safe=result['safe']; square=result['square']
+        if not reach.any():
+            self.ws_summary.set("No hay puntos alcanzables para esta X con los límites actuales.")
+        else:
+            import numpy as np
+            inds=np.where(reach)
+            yi=ya[inds[0]]; zi=za[inds[1]]
+            txt=(f"X = {result['x']:.2f} mm · {result['side']}\n"
+                 f"Alcance total (envolvente):\n"
+                 f"Y ∈ [{yi.min():.1f}, {yi.max():.1f}]\n"
+                 f"Z ∈ [{zi.min():.1f}, {zi.max():.1f}]\n"
+                 f"Ancho Y: {np.ptp(yi):.1f} · Z: {np.ptp(zi):.1f}\n"
+                 f"Puntos alcanzables: {reach.sum():,}\n"
+                 f"Puntos seguros: {safe.sum():,}\n"
+                 f"Malla de {result['step']:g} mm\n")
+            if square:
+                y0,y1,z0,z1=square
+                txt+=(f"\nCUADRADO SEGURO (aprox.):\n"
+                      f"Lado: {min(y1-y0,z1-z0):.1f} × {min(y1-y0,z1-z0):.1f} mm\n"
+                      f"Centro: Y={(y0+y1)/2:.1f}, Z={(z0+z1)/2:.1f}\n"
+                      f"Y ∈ [{y0:.1f}, {y1:.1f}]\n"
+                      f"Z ∈ [{z0:.1f}, {z1:.1f}]\n"
+                      f"Margen angular ≥5° y rodilla ≥10°\n"
+                      f"Incluye posición de lápiz levantado (X−{result['lift']:g}).")
+                self.ws_apply_btn.state(["!disabled"])
+            else:
+                txt+='\nNo se encontró un cuadrado con el margen de seguridad.'
+            self.ws_summary.set(txt)
+        self._paint_workspace()
+
+    def _paint_workspace(self):
+        r=self.ws_result
+        if r is None:
+            return
+        import numpy as np
+        from PIL import Image, ImageTk
+        c=self.ws_canvas
+        c.delete('all')
+        ya,za=r['ya'],r['za']; reach=r['attainable']; safe=r['safe']
+        # Imagen en píxeles: horizontal Z, vertical Y (ascendente hacia arriba).
+        im=np.full((len(ya),len(za),3), (238,238,238), dtype=np.uint8)
+        im[reach]=(123,183,220)
+        im[safe]=(75,169,112)
+        im=np.flipud(im)
+        width,height=560,550
+        img=Image.fromarray(im, mode='RGB').resize((width,height),resample=Image.Resampling.NEAREST)
+        self._ws_image=ImageTk.PhotoImage(img)
+        ox,oy=45,35
+        c.create_image(ox,oy,image=self._ws_image,anchor='nw')
+        c.create_rectangle(ox,oy,ox+width,oy+height,outline='#555')
+        def xy(y,z):
+            return ox+(z-za[0])/(za[-1]-za[0])*width, oy+(ya[-1]-y)/(ya[-1]-ya[0])*height
+        if r['square']:
+            y0,y1,z0,z1=r['square']; x0,top=xy(y1,z0); x1,bottom=xy(y0,z1)
+            c.create_rectangle(x0,top,x1,bottom,outline='#dc2c23',width=3)
+            c.create_text((x0+x1)/2,top-9,text=f"Cuadrado {y1-y0:.0f} mm",fill='#b22222')
+        c.create_text(ox+width/2,oy+height+15,text='Z (mm) →',fill='#333')
+        c.create_text(12,oy+height/2,text='Y (mm)',angle=90,fill='#333')
+        for frac in [0,.25,.5,.75,1]:
+            xx=ox+frac*width; zz=za[0]+frac*(za[-1]-za[0])
+            c.create_text(xx,oy+height+2,text=f'{zz:.0f}',anchor='n',font=('TkDefaultFont',8))
+            yy=ya[0]+frac*(ya[-1]-ya[0]); py=oy+(1-frac)*height
+            c.create_text(ox-6,py,text=f'{yy:.0f}',anchor='e',font=('TkDefaultFont',8))
+        c.create_text(ox,15,text='Gris: no alcanzable     Azul: alcanzable     Verde: seguro     Rojo: cuadrado',anchor='w')
+
+    def apply_workspace(self):
+        r=self.ws_result
+        if not r or not r['square']:
+            return
+        y0,y1,z0,z1=r['square']
+        try:
+            if (abs(self.ws_x.get()-r['x'])>1e-8 or
+                LADOS[self.ws_side.get()] != r['side'] or
+                abs(self.var_leg_lift.get()-r['lift'])>1e-8):
+                messagebox.showwarning('Workspace', 'Cambiaste X, la pierna o la elevación. Vuelve a analizar antes de aplicar.')
+                return
+        except (tk.TclError, KeyError):
+            messagebox.showerror('Workspace','Parámetros incorrectos.')
+            return
+        if self.strokes or self.path:
+            if not messagebox.askyesno('Aplicar workspace',
+                                       'Se limpiará el dibujo o trayectoria actual. ¿Continuar?'):
+                return
+            self.clear()
+        self.var_xp.set(r['x']); self.var_side.set('Izquierda' if r['side']=='left' else 'Derecha')
+        self.var_ymin.set(y0); self.var_ymax.set(y1)
+        self.var_zmin.set(z0); self.var_zmax.set(z1)
+        self._set_area()
+        self.tabs.select(self.tab_dibujo)
+        self.status.set('Workspace aplicado: cuadrado recomendado en plano YZ.')
+
     # ------------------------------------------------------- coordenadas ----
     def _set_area(self):
         try:
-            self.W = max(1.0, float(self.var_w.get()))
-            self.H = max(1.0, float(self.var_h.get()))
-        except (tk.TclError, ValueError):
-            messagebox.showerror("Plano", "Dimensiones no válidas")
+            ymin, ymax = float(self.var_ymin.get()), float(self.var_ymax.get())
+            zmin, zmax = float(self.var_zmin.get()), float(self.var_zmax.get())
+            if not all(math.isfinite(t) for t in (ymin, ymax, zmin, zmax)):
+                raise ValueError("Los límites deben ser finitos")
+            if ymin >= ymax or zmin >= zmax:
+                raise ValueError("Cada valor máximo debe superar el mínimo")
+        except (tk.TclError, ValueError) as e:
+            messagebox.showerror("Plano YZ", f"Rangos no válidos: {e}")
             return
+        old = getattr(self, "W", None)
+        if old is not None and self.strokes:
+            if not messagebox.askyesno("Cambiar rangos", "Los trazos existentes se limpiarán. ¿Continuar?"):
+                return
+            self.clear()
+        self.ymin, self.ymax = ymin, ymax
+        self.zmin, self.zmax = zmin, zmax
+        self.W, self.H = zmax - zmin, ymax - ymin
         self.scale = CANVAS_MAX_PX / max(self.W, self.H)
         self.canvas.config(width=self.W * self.scale + 2 * PAD,
                            height=self.H * self.scale + 2 * PAD)
         self.process(silent=True)
 
-    def to_px(self, x, y):
-        return PAD + x * self.scale, PAD + (self.H - y) * self.scale
+    def to_px(self, u, v):
+        return PAD + u * self.scale, PAD + (self.H - v) * self.scale
 
     def to_mm(self, px, py):
-        x = (px - PAD) / self.scale
-        y = self.H - (py - PAD) / self.scale
-        return min(max(x, 0.0), self.W), min(max(y, 0.0), self.H)
+        u = (px - PAD) / self.scale
+        v = self.H - (py - PAD) / self.scale
+        return min(max(u, 0.0), self.W), min(max(v, 0.0), self.H)
+
+    def _xyz_path(self):
+        return yz_to_xyz(self.path, self.zmin, self.ymin,
+                         self.var_xp.get(), self.var_leg_lift.get())
 
     # ----------------------------------------------------------- dibujo -----
     def _on_press(self, e):
@@ -657,8 +857,8 @@ class Trazador(tk.Tk):
 
     def _on_motion(self, e):
         x, y = self.to_mm(e.x, e.y)
-        self.status.set(f"x = {x:6.1f} mm   y = {y:6.1f} mm      "
-                        f"plano {self.W:g} x {self.H:g} mm   trazos: {len(self.strokes)}")
+        self.status.set(f"Z = {self.zmin + x:7.2f} mm   Y = {self.ymin + y:7.2f} mm   "
+                        f"trazos: {len(self.strokes)}")
 
     def undo(self):
         if self.strokes:
@@ -681,10 +881,9 @@ class Trazador(tk.Tk):
     def _params(self):
         step = float(self.var_step.get())
         dec = int(self.var_dec.get())
-        z, lift = float(self.var_z.get()), float(self.var_lift.get())
         if not (0.01 <= step <= 1000) or not (0 <= dec <= 6):
             raise ValueError
-        return step, dec, z, lift
+        return step, dec, 0.0, 1.0
 
     def process(self, silent=False):
         self._proc_job = None
@@ -705,34 +904,13 @@ class Trazador(tk.Tk):
                                self.var_close.get(), step)
             if f:
                 self.figs.append(f)
-        self.path = build_path(self.figs, self.W, self.H, step, dec, self.var_norm.get(),
-                               z, lift)
+        self.path = build_path(self.figs, self.W, self.H, step, dec, z, lift)
         self._check_reach()
         self.redraw()
         self._update_info()
 
     def _side(self):
         return LADOS.get(self.var_side.get(), "left")
-
-    def _set_side_defaults(self):
-        rec = PAPEL_RECOMENDADO[self._side()]
-        self.var_xp.set(rec["x_paper"])
-        self.var_yc.set(rec["yc"])
-        self.var_zc.set(rec["zc"])
-        self.var_w.set(rec["lado"])
-        self.var_h.set(rec["lado"])
-        self._set_area()
-        self.var_leg_lift.set(20)
-        self.var_scale.set(1)
-
-    def _leg_params(self):
-        scale, lift = float(self.var_scale.get()), float(self.var_leg_lift.get())
-        if scale <= 0:
-            raise ValueError
-        # El centro del plano de trabajo del trazador cae en (yc, zc).
-        return dict(x_paper=float(self.var_xp.get()), yc=float(self.var_yc.get()),
-                    zc=float(self.var_zc.get()), width=self.W, height=self.H,
-                    scale=scale, mirror=self.var_mirror.get(), lift=lift)
 
     def _check_reach(self):
         self.bad = set()
@@ -742,7 +920,7 @@ class Trazador(tk.Tk):
             self.reach.set("")
             return
         try:
-            leg = paper_to_leg(self.path, **self._leg_params())
+            leg = self._xyz_path()
         except (tk.TclError, ValueError):
             self.reach.set("Parámetros del marco no válidos")
             self.lbl_reach.config(foreground="#d62728")
@@ -760,7 +938,7 @@ class Trazador(tk.Tk):
         if not self.path:
             self.info.set("Sin trayectoria")
         elif self.loaded:
-            self.info.set(f"Archivo cargado: {len(self.path)} puntos   ·   "
+            self.info.set(f"Archivo XYZ: {len(self.path)} puntos   ·   "
                           f"levantamientos de lápiz: {count_lifts(self.path)}")
         else:
             names = ", ".join(f["name"] for f in self.figs)
@@ -770,7 +948,7 @@ class Trazador(tk.Tk):
                           + f"\nLevantamientos de lápiz: {count_lifts(self.path)}")
         self.preview.delete("1.0", "end")
         if self.path:
-            txt = format_path(self.path[:400], FORMATOS[self.var_fmt.get()], self._dec())
+            txt = format_path(self._xyz_path()[:400], FORMATOS[self.var_fmt.get()], self._dec())
             if len(self.path) > 400:
                 txt += "...\n"
             self.preview.insert("1.0", txt)
@@ -797,15 +975,15 @@ class Trazador(tk.Tk):
         while k <= self.W + 1e-9:
             px, _ = self.to_px(k, 0)
             c.create_line(px, y0, px, y1, fill="#e6e6e6")
-            c.create_text(px, y1 + 12, text=f"{k:g}", fill="#777", font=("sans", 8))
+            c.create_text(px, y1 + 12, text=f"{self.zmin + k:g}", fill="#777", font=("sans", 8))
             k += g
         k = 0
         while k <= self.H + 1e-9:
             _, py = self.to_px(0, k)
             c.create_line(x0, py, x1, py, fill="#e6e6e6")
-            c.create_text(x0 - 14, py, text=f"{k:g}", fill="#777", font=("sans", 8))
+            c.create_text(x0 - 14, py, text=f"{self.ymin + k:g}", fill="#777", font=("sans", 8))
             k += g
-        c.create_text(x1, y1 + 26, text="X (mm)", anchor="e", fill="#555", font=("sans", 8))
+        c.create_text(x1, y1 + 26, text="Z (mm)", anchor="e", fill="#555", font=("sans", 8))
         c.create_text(x0 - 4, y0 - 14, text="Y (mm)", anchor="w", fill="#555", font=("sans", 8))
         c.create_rectangle(x0, y0, x1, y1, outline="#888")
 
@@ -817,12 +995,11 @@ class Trazador(tk.Tk):
 
         if not self.path:
             return
-        # Si se normalizó, la trayectoria se dibuja tal y como saldrá en el archivo.
-        # Tramos con el lápiz abajo en azul; desplazamientos en el aire en gris
-        # discontinuo (proyección XY: la subida/bajada vertical no se ve).
+        # Azul: lápiz apoyado; gris discontinuo: desplazamiento con lápiz levantado.
+        # Se proyectan los puntos XYZ sobre el plano YZ.
         zd = self.path[0][2]
         pts = [self.to_px(p[0], p[1]) for p in self.path]
-        down = [p[2] == zd for p in self.path]
+        down = [abs(p[2] - zd) < 1e-6 for p in self.path]
         run = [pts[0]]
         for i in range(1, len(pts)):
             seg_down = down[i - 1] and down[i]
@@ -842,7 +1019,7 @@ class Trazador(tk.Tk):
             for (x, y), d in zip(pts, down):
                 if d:
                     c.create_oval(x - 1.5, y - 1.5, x + 1.5, y + 1.5, fill="#1f6fd1", outline="")
-        if not self.loaded and not self.var_norm.get():
+        if not self.loaded:
             for f in self.figs:
                 if not f["name"].startswith("círculo"):
                     for v in f["verts"]:
@@ -994,43 +1171,57 @@ class Trazador(tk.Tk):
         if not fn:
             return
         with open(fn, "w", encoding="utf-8") as fh:
-            fh.write(format_path(self.path, FORMATOS[self.var_fmt.get()], self._dec()))
+            fh.write(format_path(self._xyz_path(), FORMATOS[self.var_fmt.get()], self._dec()))
         self.status.set(f"Guardado {fn}  ({len(self.path)} puntos)")
 
     def open_txt(self):
         fn = filedialog.askopenfilename(filetypes=[("Texto", "*.txt"), ("Todos", "*")])
         if not fn:
             return
-        with open(fn, encoding="utf-8") as fh:
-            try:
-                z_def = float(self.var_z.get())
-            except (tk.TclError, ValueError):
-                z_def = 200.0
-            path = parse_path(fh.read(), z_def)
-        if not path:
-            messagebox.showerror("Abrir", "No se encontraron coordenadas en el archivo.")
-            return
-        self._stop_sim()
-        self.strokes, self.figs, self.path, self.loaded = [], [], path, True
-        self._check_reach()
-        self.redraw()
-        self._update_info()
-        self.status.set(f"Cargado {fn}")
+        try:
+            with open(fn, encoding="utf-8") as fh:
+                xyz = parse_path(fh.read(), 0.0)
+            if not xyz:
+                raise ValueError("No se encontraron puntos XYZ válidos.")
+            if not all(all(math.isfinite(a) for a in p) for p in xyz):
+                raise ValueError("Archivo con números no finitos")
+            x0 = xyz[0][0]
+            lift = max(0, max(x0 - p[0] for p in xyz))
+            if lift > 0:
+                self.var_leg_lift.set(lift)
+            self.var_xp.set(x0)
+            yvals = [p[1] for p in xyz]
+            zvals = [p[2] for p in xyz]
+            if (min(yvals) < self.ymin or max(yvals) > self.ymax or
+                    min(zvals) < self.zmin or max(zvals) > self.zmax):
+                self.var_ymin.set(min(self.ymin, math.floor(min(yvals))))
+                self.var_ymax.set(max(self.ymax, math.ceil(max(yvals))))
+                self.var_zmin.set(min(self.zmin, math.floor(min(zvals))))
+                self.var_zmax.set(max(self.zmax, math.ceil(max(zvals))))
+                self.strokes.clear()
+                self._set_area()
+            self._stop_sim()
+            lift_use = self.var_leg_lift.get()
+            path = [(z - self.zmin, y - self.ymin,
+                     (x0 - x) / lift_use if lift_use > 0 else 0.0)
+                    for x, y, z in xyz]
+            self.strokes, self.figs, self.path, self.loaded = [], [], path, True
+            self._check_reach()
+            self.redraw()
+            self._update_info()
+            self.status.set(f"Cargado XYZ: {fn}")
+        except (OSError, ValueError, tk.TclError) as err:
+            messagebox.showerror("Abrir TXT", str(err))
 
     def export_leg(self):
         if not self.loaded:
             self.process(silent=True)
         if not self.path:
-            messagebox.showinfo("Exportar", "No hay ninguna trayectoria que exportar.")
+            messagebox.showinfo("Exportar", "No hay trayectoria que exportar.")
             return
-        try:
-            params = self._leg_params()
-        except (tk.TclError, ValueError):
-            messagebox.showerror("Exportar", "Parámetros del marco de la pierna no válidos")
-            return
-        if self.bad and not messagebox.askyesno(
-                "Exportar", f"{len(self.bad)} puntos están fuera del alcance de la pierna.\n"
-                            "La interfaz se moverá de forma incorrecta. ¿Exportar de todos modos?"):
+        if self.bad:
+            messagebox.showwarning("Exportar", "Hay puntos fuera del espacio de trabajo. "
+                                   "Revisa los límites antes de utilizar la trayectoria.")
             return
         fn = filedialog.asksaveasfilename(
             defaultextension=".txt", filetypes=[("Texto", "*.txt"), ("Todos", "*")],
@@ -1038,20 +1229,22 @@ class Trazador(tk.Tk):
             initialfile="trayectoria_pierna.txt")
         if not fn:
             return
-        leg = paper_to_leg(self.path, **params)
-        ley = ""
-        if self.perf is not None:
-            ley = (f"\nley_temporal metodo={self._ley()} v={float(self.var_v_lapiz.get()):g} "
-                   f"a={float(self.var_a_lapiz.get()):g} "
-                   f"esquinas={'si' if self.var_esquinas.get() else 'no'}")
-        header = (f"Trayectoria exportada desde trazador.py (pierna {self.var_side.get().lower()}, "
-                  "sistema de las pestañas de IK: X hacia abajo, Y adelante, Z lateral, mm)\n"
-                  + "x_papel={x_paper:g} centro=({yc:g}, {zc:g}) papel={width:g}x{height:g} "
-                    "escala={scale:g} levantar={lift:g} espejo={mirror}".format(**params)
-                  + ley)
-        with open(fn, "w", encoding="utf-8") as fh:
-            fh.write(format_leg_path(leg, header))
-        self.status.set(f"Exportado {fn}  ({len(leg)} puntos)")
+        try:
+            xyz = self._xyz_path()
+            ley = ""
+            if self.perf is not None:
+                ley = (f"\nley_temporal metodo={self._ley()} v={self.var_v_lapiz.get():g} "
+                       f"a={self.var_a_lapiz.get():g} "
+                       f"esquinas={'si' if self.var_esquinas.get() else 'no'}")
+            header = ("Trayectoria cartesiana XYZ (mm) - lienzo YZ, X fijo al dibujar\n"
+                      f"rangos Y=[{self.ymin:g},{self.ymax:g}], Z=[{self.zmin:g},{self.zmax:g}] "
+                      f"X_dibujo={self.var_xp.get():g}, elevacion_X={self.var_leg_lift.get():g}"
+                      + ley)
+            with open(fn, "w", encoding="utf-8") as fh:
+                fh.write(format_leg_path(xyz, header))
+            self.status.set(f"Exportado XYZ {fn} ({len(xyz)} puntos)")
+        except (OSError, ValueError, tk.TclError) as err:
+            messagebox.showerror("Exportar", str(err))
 
 
 if __name__ == "__main__":
