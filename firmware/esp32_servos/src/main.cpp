@@ -65,12 +65,22 @@ static const uint8_t CH_B_2 = 9;   // servo 2 de la articulación B
 static const uint16_t SERVO_MIN_COUNT = 102;   // aprox 500us
 static const uint16_t SERVO_MAX_COUNT = 512;   // aprox 2500us
 
+// Servos reales: RDS51150 (DSSERVO), configurados en modo
+// 500-2500us -> 270 grados de giro electrico real (no 180).
+// SERVO_MIN_COUNT = 0 grados reales, SERVO_MAX_COUNT = 270 grados reales.
+static const float SERVO_FULL_RANGE_DEG = 270.0f;
+
+// Centro mecanico fisico real de cada servo (posicion vertical / home),
+// medido en el robot. Con rango electrico 270, el centro geometrico
+// queda en 135.
+static const float SERVO_CENTER_DEG_A = 135.0f;
+static const float SERVO_CENTER_DEG_B = 135.0f;
+
 // Comandos esperados desde ROS/serial_bridge:
-//   a0  -> centro
-//   a+  -> un lado
-//   a-  -> otro lado
-// Por eso, internamente convertimos:
-//   comando_deg in [-90, 90]  -->  servo_deg in [0, 180]
+//   a0 / b0  -> centro (posicion vertical, 135 grados reales del servo)
+//   comando_deg in [-90, 90] grados respecto al centro
+// Limita el recorrido real a 45-225 grados (deja margen mecanico
+// respecto a los topes electricos 0 y 270 del servo).
 static const float CMD_MIN_DEG = -90.0f;
 static const float CMD_MAX_DEG =  90.0f;
 
@@ -80,7 +90,8 @@ static const bool  INV_B = false;
 static const float TRIM_A_DEG = 0.0f;
 static const float TRIM_B_DEG = 0.0f;
 
-// Límites lógicos permitidos
+// Límites lógicos permitidos (grados respecto al centro, NO grados
+// reales del servo)
 static const float LIM_A_MIN = -90.0f;
 static const float LIM_A_MAX =  90.0f;
 static const float LIM_B_MIN = -90.0f;
@@ -137,22 +148,22 @@ float wrapDeg360(float x) {
   return x;
 }
 
-uint16_t angleDegToPwmCount(float servo_deg) {
-  servo_deg = clampf(servo_deg, 0.0f, 180.0f);
-  float ratio = servo_deg / 180.0f;
+uint16_t angleDegToPwmCount(float servo_deg_real) {
+  servo_deg_real = clampf(servo_deg_real, 0.0f, SERVO_FULL_RANGE_DEG);
+  float ratio = servo_deg_real / SERVO_FULL_RANGE_DEG;
   return (uint16_t)(SERVO_MIN_COUNT + ratio * (SERVO_MAX_COUNT - SERVO_MIN_COUNT));
 }
 
 float commandDegToServoDegA(float cmd_deg) {
   cmd_deg = clampf(cmd_deg, LIM_A_MIN, LIM_A_MAX);
   float s = INV_A ? -cmd_deg : cmd_deg;
-  return clampf(90.0f + TRIM_A_DEG + s, 0.0f, 180.0f);
+  return clampf(SERVO_CENTER_DEG_A + TRIM_A_DEG + s, 0.0f, SERVO_FULL_RANGE_DEG);
 }
 
 float commandDegToServoDegB(float cmd_deg) {
   cmd_deg = clampf(cmd_deg, LIM_B_MIN, LIM_B_MAX);
   float s = INV_B ? -cmd_deg : cmd_deg;
-  return clampf(90.0f + TRIM_B_DEG + s, 0.0f, 180.0f);
+  return clampf(SERVO_CENTER_DEG_B + TRIM_B_DEG + s, 0.0f, SERVO_FULL_RANGE_DEG);
 }
 
 // ==========================
