@@ -13,23 +13,60 @@ Este launch inicia:
        - Calcula/procesa la cinemática.
        - Publica /robot/joint_targets.
 
-    3. control_node
+    3. ik_node
+       - Recibe una coordenada (x, y, z) en /robot/ik_target.
+       - Calcula q1, q2, q3 (cinemática inversa algebraica).
+       - Publica el resultado en /robot/ik_result.
+
+    3.1. ik_newton_node
+       - Recibe (x, y, z) + semilla (q1,q2,q3) en
+         /robot/ik_newton_target.
+       - Calcula q1, q2, q3 (cinemática inversa iterativa,
+         método de Newton-Raphson).
+       - Publica el resultado en /robot/ik_newton_result.
+
+    3.2. ik_des_node
+       - Recibe una coordenada (x, y, z) en /robot/ik_des_target.
+       - Calcula q1, q2, q3 (cinemática inversa por desacople).
+       - Publica el resultado en /robot/ik_des_result.
+
+    3.3. ik_geom_node
+       - Recibe una coordenada (x, y, z) en /robot/ik_geom_target.
+       - Calcula q1, q2, q3 (cinemática inversa geométrica).
+       - Publica el resultado en /robot/ik_geom_result.
+
+    3.4. ik_grad_node
+       - Recibe (x, y, z) + semilla (q1,q2,q3) en
+         /robot/ik_grad_target.
+       - Calcula q1, q2, q3 (cinemática inversa iterativa,
+         gradiente descendente).
+       - Publica el resultado en /robot/ik_grad_result.
+
+    4. control_node
        - Recibe /robot/joint_targets.
        - Aplica los límites de seguridad articulares.
        - Publica /robot/joint_states.
        - Publica /robot/joint_commands.
+       - HARDWARE: recibe /robot/hardware_command, revisa e-stop
+         y límites, suma el offset de cada servo y publica
+         /servo_commands (ESP32). Responde en
+         /robot/hardware_status y convierte /servo_states a
+         grados cinemáticos en /robot/hardware_state.
 
-    4. sim_bridge
+    5. sim_bridge
        - Conecta los comandos de articulación con la simulación.
 
-    5. teleop_node
-       - Abre la interfaz gráfica.
-       - Permite controlar las tres articulaciones.
-       - Publica /robot/command.
-       - Publica /servo_commands.
-       - Muestra la cinemática directa de la pierna izquierda.
+    6. teleop_node
+       - Abre la interfaz gráfica, con dos pestañas:
+           - Cinemática directa: sliders/ángulos manuales,
+             publica /robot/command (RViz). El botón "Aplicar a
+             motores" publica /robot/hardware_command.
+           - Cinemática inversa: coordenada X,Y,Z, publica
+             /robot/ik_target y aplica el resultado recibido
+             por /robot/ik_result.
+       - Muestra la cinemática de la pierna izquierda.
 
-    6. RViz2
+    7. RViz2
        - Visualiza el modelo de la pierna y sus movimientos.
 
 IMPORTANTE:
@@ -122,8 +159,8 @@ def generate_launch_description():
     xacro_file = os.path.join(
         pkg_desc,
         'urdf',
-        'urdf_izq',
-        'pata_izq.urdf.xacro'
+        'urdf_completo',
+        'robot_completo.urdf.xacro'
     )
 
 
@@ -167,6 +204,46 @@ def generate_launch_description():
                         value_type=str
                     )
             }
+        ],
+
+        # El modelo es el robot completo (ambas piernas), pero
+        # control_node solo publica en /joint_states los joints de
+        # esta pierna. Se leen los estados ya completados por
+        # joint_state_publisher (ver abajo) para que la otra pierna
+        # también tenga TF y se dibuje en RViz.
+        remappings=[
+            ('joint_states', '/completo/joint_states')
+        ]
+    )
+
+
+    # ------------------------------------------------------------------
+    # 1.1. JOINT STATE PUBLISHER (completar la otra pierna)
+    #
+    # Toma /joint_states (los 3 joints de esta pierna, publicados por
+    # control_node) y publica en /completo/joint_states los 6 joints
+    # del robot completo, dejando en 0 los de la pierna que no se
+    # controla.
+    # ------------------------------------------------------------------
+
+    joint_states_completo = Node(
+        package='joint_state_publisher',
+
+        executable='joint_state_publisher',
+
+        name='joint_state_publisher',
+
+        namespace='completo',
+
+        parameters=[
+            {
+                'source_list': ['/joint_states'],
+                'rate': 30
+            }
+        ],
+
+        remappings=[
+            ('robot_description', '/robot_description')
         ]
     )
 
@@ -185,6 +262,101 @@ def generate_launch_description():
         parameters=[
             {
                 'num_joints': n
+            }
+        ]
+    )
+
+
+    # ==================================================================
+    # 2.1. NODO DE CINEMÁTICA INVERSA
+    # ==================================================================
+
+    ik = Node(
+        package='robot_kinematics',
+
+        executable='ik_node',
+
+        name='ik_node',
+
+        parameters=[
+            {
+                'leg_side': 'left'
+            }
+        ]
+    )
+
+
+    # ==================================================================
+    # 2.2. NODO DE CINEMÁTICA INVERSA (NEWTON-RAPHSON)
+    # ==================================================================
+
+    ik_newton = Node(
+        package='robot_kinematics',
+
+        executable='ik_newton_node',
+
+        name='ik_newton_node',
+
+        parameters=[
+            {
+                'leg_side': 'left'
+            }
+        ]
+    )
+
+
+    # ==================================================================
+    # 2.3. NODO DE CINEMÁTICA INVERSA (DESACOPLE)
+    # ==================================================================
+
+    ik_des = Node(
+        package='robot_kinematics',
+
+        executable='ik_des_node',
+
+        name='ik_des_node',
+
+        parameters=[
+            {
+                'leg_side': 'left'
+            }
+        ]
+    )
+
+
+    # ==================================================================
+    # 2.4. NODO DE CINEMÁTICA INVERSA (GEOMÉTRICO)
+    # ==================================================================
+
+    ik_geom = Node(
+        package='robot_kinematics',
+
+        executable='ik_geom_node',
+
+        name='ik_geom_node',
+
+        parameters=[
+            {
+                'leg_side': 'left'
+            }
+        ]
+    )
+
+
+    # ==================================================================
+    # 2.5. NODO DE CINEMÁTICA INVERSA (GRADIENTE DESCENDENTE)
+    # ==================================================================
+
+    ik_grad = Node(
+        package='robot_kinematics',
+
+        executable='ik_grad_node',
+
+        name='ik_grad_node',
+
+        parameters=[
+            {
+                'leg_side': 'left'
             }
         ]
     )
@@ -328,7 +500,13 @@ def generate_launch_description():
 
         # Nodos.
         description,
+        joint_states_completo,
         kinematics,
+        ik,
+        ik_newton,
+        ik_des,
+        ik_geom,
+        ik_grad,
         control,
         sim,
         teleop,

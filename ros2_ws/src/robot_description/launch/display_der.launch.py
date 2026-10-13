@@ -8,7 +8,7 @@ import os
 
 def generate_launch_description():
     pkg = get_package_share_directory('robot_description')
-    xacro_file = os.path.join(pkg, 'urdf', 'urdf_der', 'pata_der.urdf.xacro')
+    xacro_file = os.path.join(pkg, 'urdf', 'urdf_completo', 'robot_completo.urdf.xacro')
     rviz_config = os.path.join(pkg, 'config', 'robot.rviz')
     robot_description_content = Command(['xacro ', xacro_file])
 
