@@ -781,6 +781,8 @@ class TeleopNode(Node):
         except Exception:
             archivo_inicial = ''
 
+        # El selector de los cinco métodos de CI se gestiona dentro de
+        # PestanaTrayectorias y no cambia las pestañas IK independientes.
         self.pestana_trayectorias = PestanaTrayectorias(
             tab_tray, self, archivo_inicial
         )
