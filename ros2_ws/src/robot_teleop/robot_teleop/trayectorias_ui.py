@@ -38,6 +38,10 @@ from geometry_msgs.msg import Point
 from robot_kinematics import perfiles_temporales as pt
 from robot_kinematics.kinem_v6 import (
     ik_geometrico,
+    ik_desacople,
+    ik_jacobiano,
+    _resolver,
+    L1, L2, L3, L4, L5, L6, LIMITES_CONTROL_DEG,
     posicion_pie,
     pose_preparacion,
     LIMITES_CONTROL_DEG,
@@ -71,6 +75,97 @@ COLORES = ('#1f77b4', '#d62728', '#2ca02c')
 VEL_FIRMWARE_DEG_S = 20.0
 
 METODOS_LEY = ('lineal', 'cubico', 'quintico')
+
+# Los cinco métodos usan la misma convención de la pestaña de trayectorias.
+METODOS_CI = ('Algebraico', 'Geométrico', 'MTH Desacople',
+              'Newton-Raphson', 'Gradiente descendente')
+
+
+def _soluciones_algebraico_izq(x, y, z):
+    """Despeje algebraico DH; ambas ramas radial y de rodilla.
+
+    La selección de límites, postura y FK se hace en kinem_v6._resolver.
+    """
+    xp, zp = x - L2, z + L1
+    disc = xp * xp + zp * zp - L3 * L3
+    if disc < -1e-9:
+        return []
+    r0 = float(np.sqrt(max(0.0, disc)))
+    soluciones = []
+    for r in (r0, -r0):
+        q1 = np.arctan2(-zp, xp) + np.arctan2(L3, r)
+        u, v = r - L4, y
+        c3 = (u*u + v*v - L5*L5 - L6*L6) / (2*L5*L6)
+        if abs(c3) > 1 + 1e-9:
+            continue
+        c3 = float(np.clip(c3, -1.0, 1.0))
+        for s in (1.0, -1.0):
+            q3 = np.arctan2(s * np.sqrt(max(0.0, 1.0-c3*c3)), c3)
+            A, B = L5 + L6*np.cos(q3), L6*np.sin(q3)
+            den = A*A + B*B
+            q2 = np.arctan2((B*u + A*v)/den, (A*u-B*v)/den)
+            soluciones.append((float(q1), float(q2), float(q3), True))
+    return soluciones
+
+
+def _ik_algebraico(x, y, z, side='left', semilla_deg=None):
+    return _resolver(_soluciones_algebraico_izq, x, y, z, side, semilla_deg)
+
+
+def _ik_gradiente(x, y, z, side='left', semilla_deg=None):
+    """Descenso del error cartesiano usando la FK de kinem_v6.
+
+    A diferencia de Newton, usa J.T * error y búsqueda de paso, no
+    (J.JT + lambda.I)^-1. Evita mezclar convenios DH con la GUI.
+    """
+    objetivo = np.array([x, y, z], float)
+    q = np.array(semilla_deg if semilla_deg is not None else (0, 0, 0), float)
+    limites = np.array(LIMITES_CONTROL_DEG, float)
+    q = np.clip(q, limites[:, 0], limites[:, 1])
+    if abs(q[2]) < 1.0:
+        q[2] = 2.0
+    h = 1e-3
+    for _ in range(550):
+        error = objetivo - posicion_pie(q, side)
+        norma = np.linalg.norm(error)
+        if norma <= 0.5:
+            return tuple(float(v) for v in q), True, ''
+        J = np.column_stack([
+            (posicion_pie(q + np.eye(3)[j]*h, side) -
+             posicion_pie(q - np.eye(3)[j]*h, side)) / (2*h)
+            for j in range(3)])
+        grad = J.T @ error
+        if not np.all(np.isfinite(grad)) or np.linalg.norm(grad) < 1e-9:
+            break
+        # Paso de descenso adaptativo, con restricción angular.
+        paso = 0.01
+        aceptado = False
+        for _ in range(14):
+            dq = np.clip(paso*grad, -2.0, 2.0)
+            propuesta = np.clip(q + dq, limites[:, 0], limites[:, 1])
+            if np.linalg.norm(objetivo - posicion_pie(propuesta, side)) < norma - 1e-7:
+                q = propuesta
+                aceptado = True
+                break
+            paso *= 0.5
+        if not aceptado:
+            break
+    return None, False, 'gradiente descendente no convergió'
+
+
+def _ik_newton(x, y, z, side='left', semilla_deg=None):
+    semilla = semilla_deg if semilla_deg is not None else (0, 0, 0)
+    if np.linalg.norm(posicion_pie(semilla, side) - [x, y, z]) < 0.01:
+        return tuple(float(v) for v in semilla), True, ''
+    return ik_jacobiano(x, y, z, semilla, side=side)
+
+MAPA_SOLVERS_CI = {
+    'Algebraico': _ik_algebraico,
+    'Geométrico': ik_geometrico,
+    'MTH Desacople': ik_desacople,
+    'Newton-Raphson': _ik_newton,
+    'Gradiente descendente': _ik_gradiente,
+}
 
 
 def _float(entry, defecto=None):
@@ -143,8 +238,22 @@ class PestanaTrayectorias:
         ttk.Button(fa, text="Archivo...", command=self._elegir_archivo).pack(side='left')
         self.lbl_archivo = ttk.Label(fa, text=os.path.basename(self.archivo), width=26)
         self.lbl_archivo.pack(side='left', padx=4)
+        # Método de cinemática inversa para los puntos del dibujo.
+        # El selector solo interviene al planificar; no publica consignas.
+        ttk.Label(d, text='Método de CI:').grid(row=1, column=0, sticky='w', pady=(5, 1))
+        self.var_metodo_ci = tk.StringVar(value='Algebraico')
+        self.selector_ci = ttk.Combobox(
+            d, textvariable=self.var_metodo_ci, values=METODOS_CI,
+            state='readonly', width=28)
+        self.selector_ci.grid(row=1, column=1, columnspan=3, sticky='w', pady=(5, 1))
+        self.selector_ci.bind('<<ComboboxSelected>>', self._cambio_metodo_ci)
         self.var_modo_dibujo = tk.StringVar(value='Ley temporal cartesiana + articular')
-        # Modo fijo: ley temporal cartesiana + articular.
+        self.cb_modo_dibujo = ttk.Combobox(
+            d, textvariable=self.var_modo_dibujo, state='readonly', width=34,
+            values=['Ley temporal cartesiana + articular',
+                    'Puntos intermedios articulares (cúbico)'])
+        self.cb_modo_dibujo.grid(row=2, column=0, columnspan=4, sticky='w', pady=(3, 0))
+        self.cb_modo_dibujo.bind('<<ComboboxSelected>>', lambda e: self._actualizar_campos())
 
         # ---------------- 3. Movimientos articulares ----------------
         # Aproximación al dibujo, desplazamientos con el lápiz levantado y
@@ -171,7 +280,8 @@ class PestanaTrayectorias:
 
         campo('v_art', "v art. [°/s]", 1, 0, "15")
         self.var_coord = tk.BooleanVar(value=True)
-        # Coordinacion isocrona activa por defecto, sin opcion de desactivarla.
+        ttk.Checkbutton(a, text="Coordinado (isócrono)", variable=self.var_coord
+                        ).grid(row=2, column=0, columnspan=4, sticky='w')
 
         # ---------------- 3. Ley temporal del lápiz ----------------
         l = ttk.LabelFrame(f, text="4. Ley temporal del lápiz (trazos)", padding=6,
@@ -320,7 +430,7 @@ class PestanaTrayectorias:
         try:
             m, p = self._params_articulares()
             t, Q = pt.ptp_muestreado(q0, destino, m, _float(self.campos['v_art']), p,
-                                     True, DT)
+                                     self.var_coord.get(), DT)
         except (pt.ErrorPerfil, ValueError, KeyError) as error:
             self.estado(f"✗ {error or 'revisa los parámetros (números)'}", 'red')
             return
@@ -373,6 +483,15 @@ class PestanaTrayectorias:
     # CÁLCULO
     # ========================================================
 
+    def _cambio_metodo_ci(self, _event=None):
+        # Un plan anterior ya no representa el método elegido.
+        self.parar(silencioso=True)
+        self.plan = None
+        self.estado(f"CI seleccionada: {self.var_metodo_ci.get()}. Recalcula el dibujo.", 'blue')
+
+    def _solucionador_ci(self):
+        return MAPA_SOLVERS_CI[self.var_metodo_ci.get()]
+
     def _params_articulares(self):
         """Método de los movimientos articulares. La duración sale de la
         velocidad articular (v_art)."""
@@ -389,26 +508,27 @@ class PestanaTrayectorias:
         modo = self.var_modo_dibujo.get()
         if modo.startswith('Ley'):
             plan = pt.planificar_dibujo(
-                puntos, self.side, q0, ik_geometrico, posicion_pie,
+                puntos, self.side, q0, self._solucionador_ci(), posicion_pie,
                 metodo_camino=self._ley(), v_lapiz=_float(self.e_v_lapiz),
                 a_lapiz=_float(self.e_a_lapiz), metodo_articular=m, v_articular=v_art,
-                params_articular=p, coordinado=True, dt=DT,
+                params_articular=p, coordinado=self.var_coord.get(), dt=DT,
                 parar_en_esquinas=self.var_esquinas.get(),
                 umbral_esquina_deg=_float(self.e_esquina, 30.0),
                 suavizar=self.var_suavizar.get())
         else:
             plan = pt.planificar_por_puntos(
-                puntos, self.side, q0, ik_geometrico, posicion_pie, 'puntos_cubico',
+                puntos, self.side, q0, self._solucionador_ci(), posicion_pie, 'puntos_cubico',
                 v_lapiz=_float(self.e_v_lapiz),
                 params={'v_articular': v_art}, dt=DT)
         V, A = plan.derivadas()
         tramos = "\n".join(f"{a:7.2f}-{b:7.2f} s  {d}" for a, b, d in plan.tramos[:40])
         if len(plan.tramos) > 40:
             tramos += f"\n... ({len(plan.tramos)} tramos en total)"
-        return plan, (V, A), tramos
+        return plan, (V, A), f"CI: {self.var_metodo_ci.get()}\n" + tramos
 
     def calcular(self):
         self.parar(silencioso=True)
+        self.plan = None
         try:
             plan, (V, A), texto = self._plan_dibujo()
         except (pt.ErrorPerfil, ValueError, KeyError, OSError) as error:
