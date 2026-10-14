@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include <Adafruit_PWMServoDriver.h>
+#include <Preferences.h>
 
 /*
   ============================================================
@@ -104,8 +105,13 @@ static const uint8_t TCA_CH_A = 0;   // encoder articulación A
 static const uint8_t TCA_CH_B = 1;   // encoder articulación B
 
 // Si luego quieres alinear a "cero mecánico", ajustas estos offsets.
-static const int ENCODER_A_ZERO_RAW = 0;
-static const int ENCODER_B_ZERO_RAW = 0;
+// Referencias capturadas en la posicion HOME mecanica (0 grados ROS).
+// No se habilitan por defecto, deben guardarse mediante az / bz.
+int encoder_a_zero_raw = 0;
+int encoder_b_zero_raw = 0;
+bool encoder_a_aligned = false;
+bool encoder_b_aligned = false;
+Preferences encoder_store;
 static const int ENCODER_A_SIGN = +1;
 static const int ENCODER_B_SIGN = +1;
 
@@ -251,7 +257,11 @@ bool readAS5600OnChannel(uint8_t tca_channel,
 
   float deg = (360.0f * delta) / 4096.0f;
   if (sign < 0) deg = -deg;
-  out.aligned_deg = wrapDeg360(deg);
+  // Convencion articular firmada alrededor del cero mecanico.
+  // AS5600 es de una sola vuelta; no determina vueltas completas.
+  deg = wrapDeg360(deg);
+  if (deg > 180.0f) deg -= 360.0f;
+  out.aligned_deg = deg;
 
   return true;
 }
@@ -288,25 +298,28 @@ void servoReleaseAll() {
 // ==========================
 // Estado / Telemetría
 // ==========================
-String encoderStatusString(const EncoderData &enc) {
+String encoderStatusString(const EncoderData &enc, bool aligned) {
   if (!enc.present) return "no responde";
   if (!enc.magnetDetected) return "sin iman";
   if (enc.magnetWeak)   return "iman debil";
   if (enc.magnetStrong) return "iman fuerte";
-  return "campo OK, sin alinear";
+  return aligned ? "campo OK, alineado" : "campo OK, sin alinear";
 }
 
 void printShortState() {
   EncoderData a, b;
-  readAS5600OnChannel(TCA_CH_A, ENCODER_A_ZERO_RAW, ENCODER_A_SIGN, a);
-  readAS5600OnChannel(TCA_CH_B, ENCODER_B_ZERO_RAW, ENCODER_B_SIGN, b);
+  readAS5600OnChannel(TCA_CH_A, encoder_a_zero_raw, ENCODER_A_SIGN, a);
+  readAS5600OnChannel(TCA_CH_B, encoder_b_zero_raw, ENCODER_B_SIGN, b);
 
   Serial.println("Estado servos:");
+  Serial.printf("  Alineacion A=%s (raw0=%d) B=%s (raw0=%d)\n",
+      encoder_a_aligned ? "SI" : "NO", encoder_a_zero_raw,
+      encoder_b_aligned ? "SI" : "NO", encoder_b_zero_raw);
   Serial.printf("  PCA9685: %s\n", pca_ok ? "OK" : "NO detectado");
 
   if (a.present) {
     Serial.printf("  Arriba: target %.2f deg | enc raw %u | enc %.2f deg | %s\n",
-                  current_a_cmd_deg, a.raw, a.aligned_deg, encoderStatusString(a).c_str());
+                  current_a_cmd_deg, a.raw, a.aligned_deg, encoderStatusString(a, encoder_a_aligned).c_str());
   } else {
     Serial.printf("  Arriba: target %.2f deg | encoder no responde (canal %u)\n",
                   current_a_cmd_deg, TCA_CH_A);
@@ -314,7 +327,7 @@ void printShortState() {
 
   if (b.present) {
     Serial.printf("  Abajo:  target %.2f deg | enc raw %u | enc %.2f deg | %s\n",
-                  current_b_cmd_deg, b.raw, b.aligned_deg, encoderStatusString(b).c_str());
+                  current_b_cmd_deg, b.raw, b.aligned_deg, encoderStatusString(b, encoder_b_aligned).c_str());
   } else {
     Serial.printf("  Abajo:  target %.2f deg | encoder no responde (canal %u)\n",
                   current_b_cmd_deg, TCA_CH_B);
@@ -331,6 +344,8 @@ void printHelp() {
   Serial.println("  x         -> soltar todos los servos (PWM off)");
   Serial.println("  e         -> estado completo");
   Serial.println("  q         -> estado corto");
+  Serial.println("  az / bz   -> registrar HOME (0 deg) del encoder A/B sin mover servos");
+  Serial.println("  az / bz   -> alinear encoder en HOME; muestra diagnostico detallado");
   Serial.println("  p1        -> telemetria @S ON");
   Serial.println("  p0        -> telemetria @S OFF");
   Serial.println("  ?         -> ayuda");
@@ -351,46 +366,50 @@ void sendTelemetry() {
 
   EncoderData a, b;
   const bool oka = readAS5600OnChannel(
-      TCA_CH_A, ENCODER_A_ZERO_RAW, ENCODER_A_SIGN, a);
+      TCA_CH_A, encoder_a_zero_raw, ENCODER_A_SIGN, a);
   const bool okb = readAS5600OnChannel(
-      TCA_CH_B, ENCODER_B_ZERO_RAW, ENCODER_B_SIGN, b);
+      TCA_CH_B, encoder_b_zero_raw, ENCODER_B_SIGN, b);
 
   // Banderas compatibles con banco_pata.py:
   // bit 0: PWM habilitado, bit 1: lectura I2C valida,
   // bit 2: iman detectado, bit 3: campo debil,
   // bit 4: campo fuerte, bit 5: referencia angular alineada,
   // bit 6: el comando aun se esta interpolando.
-  // Esta version NO guarda ceros de encoder en Preferences:
-  // por eso el bit 5 queda en 0 y la GUI muestra 'sin alinear'.
-  auto flags = [&](const EncoderData &e, bool ok, float target, float current, bool activo) -> unsigned {
+  // El bit 5 solo se emite con referencia persistida y sensor saludable.
+  auto flags = [&](const EncoderData &e, bool ok, float target, float current,
+                   bool activo, bool aligned) -> unsigned {
     unsigned f = activo && pca_ok ? 1u : 0u;
     if (ok && e.present) {
       f |= 2u;
       if (e.magnetDetected) f |= 4u;
       if (e.magnetWeak) f |= 8u;
       if (e.magnetStrong) f |= 16u;
+      if (aligned && e.magnetDetected && !e.magnetWeak && !e.magnetStrong)
+        f |= 32u;
     }
     if (fabsf(target - current) > 0.1f && activo) f |= 64u;
     return f;
   };
 
-  const unsigned fa = flags(a, oka, target_a_cmd_deg, current_a_cmd_deg, activo_a);
-  const unsigned fb = flags(b, okb, target_b_cmd_deg, current_b_cmd_deg, activo_b);
+  const unsigned fa = flags(a, oka, target_a_cmd_deg, current_a_cmd_deg,
+                            activo_a, encoder_a_aligned);
+  const unsigned fb = flags(b, okb, target_b_cmd_deg, current_b_cmd_deg,
+                            activo_b, encoder_b_aligned);
 
   // El formato es:
   // @S,ms,a_dest,a_cmd,a_enc,a_raw,a_flags,
   //     b_dest,b_cmd,b_enc,b_raw,b_flags,i1,i2,i3
-  // Sin calibracion de encoder, a_enc y b_enc son la lectura
-  // relativa al raw 0, NO un angulo articular mecanico verificado.
+  // Sin calibracion persistida, el angulo se transmite como NaN;
+  // las lecturas RAW y banderas permanecen disponibles para diagnostico.
   // Las corrientes no se miden en este firmware: NaN.
   Serial.printf(
     "@S,%lu,%.3f,%.3f,%.3f,%u,%u,%.3f,%.3f,%.3f,%u,%u,nan,nan,nan\n",
     (unsigned long)millis(),
     target_a_cmd_deg, current_a_cmd_deg,
-    (oka && a.present) ? a.aligned_deg : NAN,
+    (fa & 32u) ? a.aligned_deg : NAN,
     (unsigned)(oka && a.present ? a.raw : 0), fa,
     target_b_cmd_deg, current_b_cmd_deg,
-    (okb && b.present) ? b.aligned_deg : NAN,
+    (fb & 32u) ? b.aligned_deg : NAN,
     (unsigned)(okb && b.present ? b.raw : 0), fb
   );
 }
@@ -461,9 +480,117 @@ void handleCommand(const String &lineRaw) {
       Serial.printf("[ACK] Velocidad %c = %.2f deg/s\n", cmd, vel);
       return;
     }
-    // No aceptar 'az', 'bz' hasta implementar alineacion persistente segura.
     if (argumento == "z") {
-      Serial.println("[RECHAZADO] Alineacion AS5600 no implementada");
+      // Solo registrar el HOME mecanico verificado externamente.
+      // No mueve motores ni altera PWM.
+      constexpr int N = 6;
+      constexpr int TOL_RAW = 8;
+      constexpr int MIN_CONSISTENTES = 5;
+      const uint8_t channel = esA ? TCA_CH_A : TCA_CH_B;
+      const int sign = esA ? ENCODER_A_SIGN : ENCODER_B_SIGN;
+      int raw[N];
+      EncoderData sample;
+      const char *motivo = nullptr;
+      int recibidas = 0;
+      Serial.printf("[DIAG] Encoder %c: 6 muestras, mediana circular, minimo %d/%d a +/- %d RAW, TCA=%u\n",
+                    cmd, MIN_CONSISTENTES, N, TOL_RAW, channel);
+
+      for (int k = 0; k < N; ++k) {
+        const bool lectura_ok = readAS5600OnChannel(channel, 0, sign, sample);
+        if (!lectura_ok || !sample.present) {
+          motivo = "lectura I2C fallida (TCA/STATUS/RAW_ANGLE)";
+          Serial.printf("[DIAG] %c muestra %d/%d: ERROR I2C\n", cmd, k + 1, N);
+          break;
+        }
+        if (!sample.magnetDetected || sample.magnetWeak || sample.magnetStrong) {
+          motivo = !sample.magnetDetected ? "iman ausente" :
+                   sample.magnetWeak ? "campo magnetico debil" : "campo magnetico fuerte";
+          Serial.printf("[DIAG] %c muestra %d/%d: RAW=%u, iman=%s, debil=%s, fuerte=%s\n",
+                        cmd, k + 1, N, sample.raw,
+                        sample.magnetDetected ? "SI" : "NO",
+                        sample.magnetWeak ? "SI" : "NO",
+                        sample.magnetStrong ? "SI" : "NO");
+          break;
+        }
+        raw[k] = (int)sample.raw;
+        ++recibidas;
+        Serial.printf("[DIAG] %c muestra %d/%d: RAW=%d, iman=SI, campo=OK\n",
+                      cmd, k + 1, N, raw[k]);
+        if (k < N - 1) delay(5);
+      }
+      if (motivo != nullptr || recibidas != N) {
+        Serial.printf("[RECHAZADO] %c: %s. Cero anterior conservado.\n",
+                      cmd, motivo ? motivo : "faltan muestras");
+        return;
+      }
+
+      // Los RAW son circulares (4095 -> 0). Buscar una referencia
+      // candidata con la mayor cantidad de vecinos y, en ese entorno,
+      // calcular la mediana de las 6 lecturas desenrolladas.
+      int mejor_cantidad = -1;
+      int mejor_referencia = raw[0];
+      for (int j = 0; j < N; ++j) {
+        int cantidad = 0;
+        for (int i = 0; i < N; ++i) {
+          int d = abs(raw[i] - raw[j]);
+          if (d > 2048) d = 4096 - d;
+          if (d <= TOL_RAW) ++cantidad;
+        }
+        if (cantidad > mejor_cantidad) {
+          mejor_cantidad = cantidad;
+          mejor_referencia = raw[j];
+        }
+      }
+      // Si hay suficientes vecinos de una candidata, el conjunto es
+      // coherente incluso si una lectura aislada fue anomala.
+      if (mejor_cantidad < MIN_CONSISTENTES) {
+        Serial.printf("[RECHAZADO] %c: muestras dispersas; mayor grupo=%d/%d dentro de %d RAW. Cero anterior conservado.\n",
+                      cmd, mejor_cantidad, N, TOL_RAW);
+        return;
+      }
+
+      int ordenados[N];
+      for (int i = 0; i < N; ++i) {
+        int d = raw[i] - mejor_referencia;
+        if (d > 2048) d -= 4096;
+        if (d < -2048) d += 4096;
+        ordenados[i] = mejor_referencia + d;
+      }
+      for (int i = 1; i < N; ++i) {
+        int x = ordenados[i];
+        int j = i - 1;
+        while (j >= 0 && ordenados[j] > x) {
+          ordenados[j + 1] = ordenados[j];
+          --j;
+        }
+        ordenados[j + 1] = x;
+      }
+      const float mediana = 0.5f * (ordenados[2] + ordenados[3]);
+      const int candidato = ((int)lroundf(mediana) % 4096 + 4096) % 4096;
+      int consistentes = 0;
+      int max_desviacion = 0;
+      for (int i = 0; i < N; ++i) {
+        int d = abs(raw[i] - candidato);
+        if (d > 2048) d = 4096 - d;
+        if (d <= TOL_RAW) ++consistentes;
+        if (d > max_desviacion) max_desviacion = d;
+      }
+      Serial.printf("[DIAG] %c: mediana=%.2f, RAW0 candidato=%d, consistentes=%d/%d, max desviacion=%d RAW\n",
+                    cmd, mediana, candidato, consistentes, N, max_desviacion);
+      if (consistentes < MIN_CONSISTENTES) {
+        Serial.printf("[RECHAZADO] %c: dispersion excesiva respecto a la mediana. Cero anterior conservado.\n", cmd);
+        return;
+      }
+      // Guardar por separado. Nunca cambiar la referencia RAM si falla NVS.
+      const char *key = esA ? "a_zero" : "b_zero";
+      if (encoder_store.putUShort(key, (uint16_t)candidato) != sizeof(uint16_t)) {
+        Serial.printf("[RECHAZADO] %c: error escribiendo Preferences\n", cmd);
+        return;
+      }
+      if (esA) { encoder_a_zero_raw = candidato; encoder_a_aligned = true; }
+      else     { encoder_b_zero_raw = candidato; encoder_b_aligned = true; }
+      Serial.printf("[ACK] Encoder %c alineado a HOME 0 deg; RAW0=%d (mediana, %d/%d consistentes, guardado)\n",
+                    cmd, candidato, consistentes, N);
       return;
     }
     char *fin = nullptr;
@@ -506,7 +633,18 @@ void setup() {
   Wire.begin(PIN_SDA, PIN_SCL, 100000);
   delay(100);
 
+  // Namespace separado de la calibracion del BLDC.
+  encoder_store.begin("enc_servos", false);
+  encoder_a_aligned = encoder_store.isKey("a_zero");
+  encoder_b_aligned = encoder_store.isKey("b_zero");
+  if (encoder_a_aligned) encoder_a_zero_raw = encoder_store.getUShort("a_zero", 0);
+  if (encoder_b_aligned) encoder_b_zero_raw = encoder_store.getUShort("b_zero", 0);
+  if (encoder_a_zero_raw > 4095) encoder_a_aligned = false;
+  if (encoder_b_zero_raw > 4095) encoder_b_aligned = false;
+
   printBootInfo();
+  Serial.printf("AS5600: alineado A=%s, B=%s\n",
+                encoder_a_aligned ? "SI" : "NO", encoder_b_aligned ? "SI" : "NO");
 
   pca_ok = i2cDevicePresent(ADDR_PCA9685);
   if (pca_ok) {
@@ -523,19 +661,19 @@ void setup() {
   Serial.printf("TCA9548A: %s\n", tca_ok ? "OK" : "NO detectado");
 
   EncoderData a, b;
-  bool oka = readAS5600OnChannel(TCA_CH_A, ENCODER_A_ZERO_RAW, ENCODER_A_SIGN, a);
-  bool okb = readAS5600OnChannel(TCA_CH_B, ENCODER_B_ZERO_RAW, ENCODER_B_SIGN, b);
+  bool oka = readAS5600OnChannel(TCA_CH_A, encoder_a_zero_raw, ENCODER_A_SIGN, a);
+  bool okb = readAS5600OnChannel(TCA_CH_B, encoder_b_zero_raw, ENCODER_B_SIGN, b);
 
   if (oka && a.present) {
     Serial.printf("Encoder Arriba (canal %u): raw %u | %.2f deg | %s\n",
-                  TCA_CH_A, a.raw, a.aligned_deg, encoderStatusString(a).c_str());
+                  TCA_CH_A, a.raw, a.aligned_deg, encoderStatusString(a, encoder_a_aligned).c_str());
   } else {
     Serial.printf("Encoder Arriba (canal %u): no responde\n", TCA_CH_A);
   }
 
   if (okb && b.present) {
     Serial.printf("Encoder Abajo  (canal %u): raw %u | %.2f deg | %s\n",
-                  TCA_CH_B, b.raw, b.aligned_deg, encoderStatusString(b).c_str());
+                  TCA_CH_B, b.raw, b.aligned_deg, encoderStatusString(b, encoder_b_aligned).c_str());
   } else {
     Serial.printf("Encoder Abajo  (canal %u): no responde\n", TCA_CH_B);
   }
